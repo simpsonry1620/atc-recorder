@@ -1,0 +1,35 @@
+# ATC Recorder Configuration
+
+# Output directory for recordings
+output_dir: ./recordings
+
+# Duration of each recording segment in seconds (1800 = 30 minutes)
+segment_duration: 1800
+
+# Delay between HTTP requests in seconds (be respectful to servers)
+request_delay: 1.0
+
+# User agent string for HTTP requests
+user_agent: ATC-Recorder/0.1.0
+
+# List of feed IDs to record (for daemon mode)
+# See available feeds with: atc-recorder feeds list kdca
+feeds:
+  - kdca1_gnd          # Ground (121.700)
+  - kdca1_twr          # Tower (119.100) - kdca2_twr was offline
+  - kdca1_app_final    # Approach DCA Final (124.700)
+  - kdca1_dep          # Potomac Departure (118.950)
+
+# Recording behavior settings
+recording:
+  # Enable/disable recording
+  enabled: true
+  
+  # Delay before attempting to reconnect after a stream drops (seconds)
+  reconnect_delay: 30
+  
+  # Maximum number of reconnection attempts before giving up
+  max_retries: 5
+  
+  # Segment duration for live recording (should match top-level segment_duration)
+  segment_duration: 1800

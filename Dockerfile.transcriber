@@ -1,0 +1,52 @@
+# ATC Recorder Transcription Worker
+# Uses NVIDIA Riva client for ASR via Whisper NIM
+
+FROM python:3.11-slim
+
+# Labels for container metadata
+LABEL org.opencontainers.image.title="ATC Transcription Worker"
+LABEL org.opencontainers.image.description="Watch and transcribe ATC recordings using NVIDIA Whisper"
+LABEL org.opencontainers.image.version="0.1.0"
+
+# Install runtime dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ffmpeg \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --shell /bin/bash atc
+
+# Set working directory
+WORKDIR /app
+
+# Copy requirements and install dependencies
+COPY requirements.txt requirements-transcriber.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r requirements-transcriber.txt
+
+# Copy application code
+COPY --chown=atc:atc pyproject.toml README.md ./
+COPY --chown=atc:atc src/ ./src/
+COPY --chown=atc:atc config.yaml ./
+
+# Install the package
+RUN pip install --no-cache-dir .
+
+# Create directories with proper permissions
+RUN mkdir -p /app/recordings /app/logs \
+    && chown -R atc:atc /app
+
+# Switch to non-root user
+USER atc
+
+# Environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV WHISPER_GRPC_HOST=whisper-asr
+ENV WHISPER_GRPC_PORT=50051
+
+# Health check - verify connection to Whisper service
+HEALTHCHECK --interval=60s --timeout=15s --start-period=30s --retries=3 \
+    CMD atc-recorder transcribe --check || exit 1
+
+# Default command - start the file watcher
+ENTRYPOINT ["atc-recorder"]
+CMD ["transcribe-watch"]

@@ -1,0 +1,183 @@
+# ATC Recorder Docker Compose Configuration
+#
+# Usage:
+#   docker compose up --build                              # Build and show help
+#   docker compose run --rm atc-recorder feeds list kdca   # List feeds
+#   docker compose run --rm atc-recorder record kdca1_gnd --duration 30m
+#   docker compose up -d atc-daemon                        # Run daemon in background
+#   docker compose logs -f atc-daemon                      # View daemon logs
+#   docker compose --profile archive run --rm atc-archiver download kdca1_gnd --date 2026-02-01
+#   docker compose --profile asr up -d                     # Start ASR transcription services
+
+x-common: &common
+  build:
+    context: .
+    dockerfile: Dockerfile
+  volumes:
+    - ./recordings:/app/recordings
+    - ./config.yaml:/app/config.yaml:ro
+    - ./logs:/app/logs
+  environment:
+    - TZ=${TZ:-UTC}
+    - ATC_LOG_LEVEL=${ATC_LOG_LEVEL:-INFO}
+  networks:
+    - atc-network
+
+services:
+  # Main CLI service - for ad-hoc commands
+  atc-recorder:
+    <<: *common
+    container_name: atc-recorder-cli
+    stdin_open: true
+    tty: true
+    # Override command as needed, e.g.:
+    # command: ["record", "kdca1_gnd", "--duration", "30m"]
+
+  # Daemon service for continuous recording
+  atc-daemon:
+    <<: *common
+    container_name: atc-recorder-daemon
+    command: ["daemon", "--config", "/app/config.yaml"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "atc-recorder", "check"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+
+  # Archive downloader service - use with --profile archive
+  atc-archiver:
+    <<: *common
+    container_name: atc-recorder-archiver
+    profiles:
+      - archive
+    # Example usage:
+    # docker compose --profile archive run --rm atc-archiver download kdca1_gnd --date 2026-02-01 --hours 24
+
+  # Scheduled archive downloader (downloads previous day's archives daily)
+  atc-archive-cron:
+    <<: *common
+    container_name: atc-recorder-archive-cron
+    profiles:
+      - cron
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Archive cron job started"
+        while true; do
+          # Calculate yesterday's date
+          YESTERDAY=$$(date -d "yesterday" +%Y-%m-%d 2>/dev/null || date -v-1d +%Y-%m-%d)
+          echo "$$(date): Downloading archives for $$YESTERDAY"
+          
+          # Download archives for each configured feed
+          for feed in kdca1_gnd kdca2_twr kdca1_app_final kdca1_dep; do
+            echo "Downloading $$feed for $$YESTERDAY"
+            atc-recorder download $$feed --date $$YESTERDAY --hours 24 || true
+            sleep 5
+          done
+          
+          # Sleep until next day (run at 2 AM UTC)
+          NEXT_RUN=$$(date -d "tomorrow 02:00" +%s 2>/dev/null || date -v+1d -v2H -v0M -v0S +%s)
+          NOW=$$(date +%s)
+          SLEEP_TIME=$$((NEXT_RUN - NOW))
+          echo "Next run in $$SLEEP_TIME seconds"
+          sleep $$SLEEP_TIME
+        done
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "5m"
+        max-file: "3"
+
+  # NVIDIA Whisper ASR service - use with --profile asr
+  # Requires: NVIDIA GPU, Container Toolkit, and NGC_API_KEY
+  # First run may take up to 30 minutes for model download
+  whisper-asr:
+    image: nvcr.io/nim/nvidia/whisper-large-v3:latest
+    container_name: atc-whisper-asr
+    profiles:
+      - asr
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: 8gb
+    environment:
+      - NGC_API_KEY=${NGC_API_KEY}
+      - NIM_HTTP_API_PORT=9000
+      - NIM_GRPC_API_PORT=50051
+      - NIM_TAGS_SELECTOR=name=whisper-large-v3
+    ports:
+      - "9000:9000"
+      - "50051:50051"
+    networks:
+      - atc-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/v1/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 300s
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+  # Transcription worker - watches recordings and transcribes new files
+  transcription-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.transcriber
+    container_name: atc-transcription-worker
+    profiles:
+      - asr
+    volumes:
+      - ./recordings:/app/recordings
+      - ./config.yaml:/app/config.yaml:ro
+      - ./logs:/app/logs
+    environment:
+      - TZ=${TZ:-UTC}
+      - ATC_LOG_LEVEL=${ATC_LOG_LEVEL:-INFO}
+      - WHISPER_GRPC_HOST=whisper-asr
+      - WHISPER_GRPC_PORT=50051
+    networks:
+      - atc-network
+    depends_on:
+      whisper-asr:
+        condition: service_healthy
+    command: ["transcribe-watch", "--config", "/app/config.yaml"]
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+        reservations:
+          memory: 128M
+
+networks:
+  atc-network:
+    driver: bridge

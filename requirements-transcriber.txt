@@ -1,0 +1,4 @@
+# Additional dependencies for transcription worker
+nvidia-riva-client>=2.14.0
+watchdog>=3.0.0
+grpcio>=1.60.0
