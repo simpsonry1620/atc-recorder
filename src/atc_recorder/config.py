@@ -27,6 +27,11 @@ class TranscriptionConfig:
     min_speech_duration: float = 0.3
     merge_gap_seconds: float = 0.5
     output_format: str = "json"  # json, timestamped-txt, srt
+    diarization_enabled: bool = False
+    diarization_mode: str = "role-heuristic"  # role-heuristic
+    stitch_across_files: bool = False
+    stitch_max_gap_seconds: float = 2.0
+    stitch_min_text_overlap_chars: int = 12
 
 
 @dataclass
@@ -36,7 +41,7 @@ class EmbeddingConfig:
     provider: str = "nvidia-nim"
     endpoint: str = "http://localhost:9080/v1/embeddings"
     model: str = "nvidia/llama-3_2-nv-embedqa-1b-v2"
-    api_key_env: str = "NVIDIA_API_KEY"
+    api_key_env: str = "NIM_RETRIEVER_API_KEY"
     timeout_seconds: float = 15.0
     max_retries: int = 3
     retry_backoff_seconds: float = 1.0
@@ -138,6 +143,11 @@ class Config:
                 min_speech_duration=t.get('min_speech_duration', 0.3),
                 merge_gap_seconds=t.get('merge_gap_seconds', 0.5),
                 output_format=t.get('output_format', 'json'),
+                diarization_enabled=t.get('diarization_enabled', False),
+                diarization_mode=t.get('diarization_mode', 'role-heuristic'),
+                stitch_across_files=t.get('stitch_across_files', False),
+                stitch_max_gap_seconds=t.get('stitch_max_gap_seconds', 2.0),
+                stitch_min_text_overlap_chars=t.get('stitch_min_text_overlap_chars', 12),
             )
 
         rag_config = None
@@ -154,7 +164,7 @@ class Config:
                     provider=emb_data.get("provider", "nvidia-nim"),
                     endpoint=emb_data.get("endpoint", "http://localhost:9080/v1/embeddings"),
                     model=emb_data.get("model", "nvidia/llama-3_2-nv-embedqa-1b-v2"),
-                    api_key_env=emb_data.get("api_key_env", "NVIDIA_API_KEY"),
+                    api_key_env=emb_data.get("api_key_env", "NIM_RETRIEVER_API_KEY"),
                     timeout_seconds=emb_data.get("timeout_seconds", 15.0),
                     max_retries=emb_data.get("max_retries", 3),
                     retry_backoff_seconds=emb_data.get("retry_backoff_seconds", 1.0),
@@ -223,6 +233,11 @@ class Config:
                 'min_speech_duration': self.transcription.min_speech_duration,
                 'merge_gap_seconds': self.transcription.merge_gap_seconds,
                 'output_format': self.transcription.output_format,
+                'diarization_enabled': self.transcription.diarization_enabled,
+                'diarization_mode': self.transcription.diarization_mode,
+                'stitch_across_files': self.transcription.stitch_across_files,
+                'stitch_max_gap_seconds': self.transcription.stitch_max_gap_seconds,
+                'stitch_min_text_overlap_chars': self.transcription.stitch_min_text_overlap_chars,
             }
         if self.rag is not None:
             d["rag"] = {

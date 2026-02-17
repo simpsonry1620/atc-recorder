@@ -116,6 +116,11 @@ transcription:
   min_speech_duration: 0.3
   merge_gap_seconds: 0.5
   output_format: json  # json | timestamped-txt | srt
+  diarization_enabled: false
+  diarization_mode: role-heuristic
+  stitch_across_files: false
+  stitch_max_gap_seconds: 2.0
+  stitch_min_text_overlap_chars: 12
 ```
 
 ## Output Structure
@@ -219,6 +224,9 @@ docker compose run --rm atc-recorder transcribe recordings/kdca1_gnd/2026-02-04/
 # Segment by pauses (one segment per utterance) and write timestamped .txt
 docker compose run --rm atc-recorder transcribe --segment-by-pauses --output-format timestamped-txt recordings/.../file.mp3
 
+# Add role diarization labels and stitch boundary transmissions
+docker compose run --rm atc-recorder transcribe --segment-by-pauses --diarization --stitch-across-files recordings/.../file.mp3
+
 # Also export SRT subtitles
 docker compose run --rm atc-recorder transcribe --segment-by-pauses --output-format srt recordings/.../file.mp3
 
@@ -238,7 +246,7 @@ docker compose --profile asr up -d
 docker compose logs -f transcription-worker
 ```
 
-The worker reads optional `transcription` settings from `config.yaml` (pause segmentation thresholds and output format).
+The worker reads optional `transcription` settings from `config.yaml` (pause segmentation thresholds, output format, role diarization, and cross-file stitching).
 
 #### Transcribe Existing Recordings
 
@@ -256,6 +264,9 @@ docker compose run --rm atc-recorder transcribe-all --force
 
 # Batch mode with pause segmentation and SRT export
 docker compose run --rm atc-recorder transcribe-all --segment-by-pauses --output-format srt
+
+# Batch mode with role diarization + cross-file stitching
+docker compose run --rm atc-recorder transcribe-all --segment-by-pauses --diarization --stitch-across-files
 ```
 
 #### Compare Audio Preprocessing Methods
@@ -293,6 +304,13 @@ Transcript JSON format:
 }
 ```
 
+When `transcription.diarization_enabled: true`, each segment is enriched with:
+- `speaker_role`: `ATC`, `PILOT`, or `UNKNOWN`
+- `speaker_id`: role-level stable label (`spk_atc`, `spk_pilot`, `spk_unknown`)
+- `speaker_confidence`: heuristic confidence score
+
+When `transcription.stitch_across_files: true`, adjacent transcripts are stitched at file boundaries when timing and text continuity indicate the same transmission. Stitch metadata is added to boundary segments (for example `stitched_with_previous`, `stitch_next`, `source_audio_files`, and `skip_for_ingest`) while preserving backward-compatible transcript fields.
+
 **Timestamped segments and export formats:** Use `--segment-by-pauses` to split the transcript by silence (e.g. between ATC and pilot) so each segment has `start_time` and `end_time` in seconds. This works even when the ASR service does not return word-level timings. With `--output-format timestamped-txt` or `--output-format srt`, an additional file is written alongside the JSON: a timestamped text file (`[MM:SS.mmm] - [MM:SS.mmm] text`) or SRT subtitles. You can set `transcription` options in `config.yaml` so the transcription worker uses the same behavior automatically.
 
 ### Streaming-to-RAG (Phase 1)
@@ -314,9 +332,12 @@ rag:
   ingest_on_transcribe: true
   embedding:
     provider: nvidia-nim
+    # Docker Compose runtime (service-to-service)
     endpoint: http://embedding-nim:8000/v1/embeddings
+    # Host CLI runtime alternative:
+    # endpoint: http://localhost:9080/v1/embeddings
     model: nvidia/llama-3_2-nv-embedqa-1b-v2
-    api_key_env: NVIDIA_API_KEY
+    api_key_env: NIM_RETRIEVER_API_KEY
   vector_store:
     provider: milvus
     host: milvus-standalone
@@ -328,8 +349,8 @@ rag:
 #### Start RAG services
 
 ```bash
-# Start Milvus + API (rag profile)
-docker compose --profile rag up -d milvus-etcd milvus-minio milvus-standalone rag-api
+# Start Retriever + Milvus + API (rag profile)
+docker compose --profile rag up -d embedding-nim milvus-etcd milvus-minio milvus-standalone rag-api
 
 # Backfill existing transcript JSON files
 docker compose run --rm atc-recorder ingest-transcripts
@@ -337,6 +358,34 @@ docker compose run --rm atc-recorder ingest-transcripts
 # Validate embedding + vector connectivity
 docker compose run --rm atc-recorder rag-check
 ```
+
+If you run `atc-recorder` directly on the host (outside Docker), point `rag.embedding.endpoint` to `http://localhost:9080/v1/embeddings`.
+
+#### Local Retriever runbook
+
+```bash
+# 1) Bring up Retriever + Milvus + API
+docker compose --profile rag up -d embedding-nim milvus-etcd milvus-minio milvus-standalone rag-api
+
+# 2) Check Retriever readiness
+docker compose --profile rag ps embedding-nim
+docker compose --profile rag logs embedding-nim
+
+# 3) Validate end-to-end embedding + vector store connectivity
+docker compose run --rm atc-recorder rag-check
+
+# 4) Backfill transcript JSON files into Milvus
+docker compose run --rm atc-recorder ingest-transcripts
+
+# 5) Run a semantic query
+docker compose run --rm atc-recorder search "departure congestion" --feed-id kdca1_dep --top-k 5
+```
+
+Quick checks when startup fails:
+- Retriever unhealthy: verify `NIM_RETRIEVER_API_KEY` is set and `embedding-nim` logs show model startup completed.
+- Wrong endpoint: inside Docker use `http://embedding-nim:8000/v1/embeddings`; host CLI use `http://localhost:9080/v1/embeddings`.
+- Auth mismatch: confirm `rag.embedding.api_key_env` matches the env var exported in the running process/container.
+- Vector mismatch after model change: set `rag.vector_store.embedding_dim` to the Retriever model output dimension before ingesting.
 
 #### Query by time and channel
 
@@ -370,6 +419,11 @@ Available environment variables:
 - `TZ`: Timezone (default: UTC)
 - `ATC_LOG_LEVEL`: Logging level - DEBUG, INFO, WARNING, ERROR (default: INFO)
 - `NGC_API_KEY`: NVIDIA NGC API key (required for ASR features)
+- `NIM_RETRIEVER_API_KEY`: API key for local NIM Retriever embeddings
+- `NIM_RETRIEVER_IMAGE`: Retriever container image tag (default in `.env.example`)
+- `NIM_RETRIEVER_HTTP_PORT`: Internal Retriever HTTP port (default: `8000`)
+- `NIM_RETRIEVER_HOST_PORT`: Host port mapped to Retriever HTTP port (default: `9080`)
+- `NIM_RETRIEVER_TAGS_SELECTOR`: Optional Retriever model selector
 - `WHISPER_GRPC_HOST`: Whisper gRPC host (default: whisper-asr)
 - `WHISPER_GRPC_PORT`: Whisper gRPC port (default: 50051)
 

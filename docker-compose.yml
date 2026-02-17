@@ -20,6 +20,7 @@ x-common: &common
   environment:
     - TZ=${TZ:-UTC}
     - ATC_LOG_LEVEL=${ATC_LOG_LEVEL:-INFO}
+    - NIM_RETRIEVER_API_KEY=${NIM_RETRIEVER_API_KEY:-}
   networks:
     - atc-network
 
@@ -178,6 +179,44 @@ services:
         reservations:
           memory: 128M
 
+  # NVIDIA NIM Retriever embedding service - use with --profile rag
+  # Requires: NVIDIA GPU, Container Toolkit, and NIM_RETRIEVER_API_KEY
+  embedding-nim:
+    image: ${NIM_RETRIEVER_IMAGE:-nvcr.io/nim/nvidia/llama-3.2-nv-embedqa-1b-v2:latest}
+    container_name: atc-embedding-nim
+    profiles:
+      - rag
+      - retriever
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: 8gb
+    environment:
+      - NGC_API_KEY=${NIM_RETRIEVER_API_KEY}
+      - NIM_HTTP_API_PORT=${NIM_RETRIEVER_HTTP_PORT:-8000}
+      - NIM_TAGS_SELECTOR=${NIM_RETRIEVER_TAGS_SELECTOR:-name=llama-3.2-nv-embedqa-1b-v2}
+    ports:
+      - "${NIM_RETRIEVER_HOST_PORT:-9080}:${NIM_RETRIEVER_HTTP_PORT:-8000}"
+    networks:
+      - atc-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:${NIM_RETRIEVER_HTTP_PORT:-8000}/v1/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 240s
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
   # Milvus dependencies - use with --profile rag
   milvus-etcd:
     image: quay.io/coreos/etcd:v3.5.5
@@ -245,6 +284,8 @@ services:
     ports:
       - "8100:8100"
     depends_on:
+      embedding-nim:
+        condition: service_healthy
       milvus-standalone:
         condition: service_healthy
     healthcheck:

@@ -578,6 +578,10 @@ def check(quiet: bool, strict: bool) -> None:
               help='Output format: json only, or also write timestamped .txt or .srt')
 @click.option('--periodic-markers', default=0, type=float,
               help='In timestamped-txt, insert marker lines every N seconds (0=off)')
+@click.option('--diarization', is_flag=True,
+              help='Annotate segments with role diarization labels (ATC/PILOT/UNKNOWN)')
+@click.option('--stitch-across-files', is_flag=True,
+              help='Stitch boundary transmissions with previous transcript when adjacent in time')
 def transcribe(
     audio_file: Optional[Path],
     host: str,
@@ -590,6 +594,8 @@ def transcribe(
     silence_db: float,
     output_format: str,
     periodic_markers: float,
+    diarization: bool,
+    stitch_across_files: bool,
 ) -> None:
     """Transcribe an audio file using Whisper ASR.
     
@@ -639,6 +645,8 @@ def transcribe(
             silence_threshold_dB=silence_db,
             output_format=output_format,
             periodic_timestamp_interval_sec=periodic_markers,
+            diarization_enabled=diarization,
+            stitch_across_files=stitch_across_files,
         )
     
     if result.success:
@@ -712,6 +720,11 @@ def transcribe_watch(
     min_speech_duration = trans.min_speech_duration if trans else 0.3
     merge_gap_seconds = trans.merge_gap_seconds if trans else 0.5
     output_format = trans.output_format if trans else 'json'
+    diarization_enabled = trans.diarization_enabled if trans else False
+    diarization_mode = trans.diarization_mode if trans else "role-heuristic"
+    stitch_across_files = trans.stitch_across_files if trans else False
+    stitch_max_gap_seconds = trans.stitch_max_gap_seconds if trans else 2.0
+    stitch_min_text_overlap_chars = trans.stitch_min_text_overlap_chars if trans else 12
 
     console.print("[bold]ATC Transcription Watcher[/bold]")
     console.print(f"  Watch directory: {watch_dir}")
@@ -719,6 +732,8 @@ def transcribe_watch(
     console.print(f"  Language: {language}")
     if segment_by_pauses:
         console.print(f"  Segment by pauses: yes (min_silence={min_silence_duration}s)")
+    console.print(f"  Role diarization: {'enabled' if diarization_enabled else 'disabled'}")
+    console.print(f"  Cross-file stitching: {'enabled' if stitch_across_files else 'disabled'}")
     console.print(f"  Output format: {output_format}")
     console.print()
     console.print("[dim]Press Ctrl+C to stop[/dim]")
@@ -738,6 +753,11 @@ def transcribe_watch(
             merge_gap_seconds=merge_gap_seconds,
             output_format=output_format,
             on_transcript_saved=ingest_callback,
+            diarization_enabled=diarization_enabled,
+            diarization_mode=diarization_mode,
+            stitch_across_files=stitch_across_files,
+            stitch_max_gap_seconds=stitch_max_gap_seconds,
+            stitch_min_text_overlap_chars=stitch_min_text_overlap_chars,
         )
     except KeyboardInterrupt:
         pass
@@ -760,6 +780,10 @@ def transcribe_watch(
               help='Segment by silence and timestamp each segment')
 @click.option('--output-format', type=click.Choice(['json', 'timestamped-txt', 'srt']), default='json',
               help='Output format: json only, or also write .txt or .srt')
+@click.option('--diarization', is_flag=True,
+              help='Annotate segments with role diarization labels (ATC/PILOT/UNKNOWN)')
+@click.option('--stitch-across-files', is_flag=True,
+              help='Stitch boundary transmissions with previous transcript when adjacent in time')
 @click.option('--dry-run', is_flag=True,
               help='Show files that would be transcribed without processing')
 @click.pass_context
@@ -772,6 +796,8 @@ def transcribe_all(
     force: bool,
     segment_by_pauses: bool,
     output_format: str,
+    diarization: bool,
+    stitch_across_files: bool,
     dry_run: bool,
 ) -> None:
     """Transcribe recordings in the recordings directory.
@@ -792,6 +818,12 @@ def transcribe_all(
         cfg = ctx.obj['config']
     
     recordings_dir = cfg.output_dir
+    trans = getattr(cfg, "transcription", None)
+    diarization_enabled = diarization or (trans.diarization_enabled if trans else False)
+    diarization_mode = trans.diarization_mode if trans else "role-heuristic"
+    stitch_enabled = stitch_across_files or (trans.stitch_across_files if trans else False)
+    stitch_max_gap_seconds = trans.stitch_max_gap_seconds if trans else 2.0
+    stitch_min_text_overlap_chars = trans.stitch_min_text_overlap_chars if trans else 12
     
     # Find files to transcribe
     with console.status("[bold blue]Scanning for files..."):
@@ -818,6 +850,8 @@ def transcribe_all(
     console.print(f"  Language: {language}")
     if segment_by_pauses:
         console.print("  Segment by pauses: yes")
+    console.print(f"  Role diarization: {'enabled' if diarization_enabled else 'disabled'}")
+    console.print(f"  Cross-file stitching: {'enabled' if stitch_enabled else 'disabled'}")
     console.print(f"  Output format: {output_format}")
     console.print()
 
@@ -850,11 +884,27 @@ def transcribe_all(
                 result = client.convert_and_transcribe(
                     audio_file,
                     segment_by_pauses=segment_by_pauses,
+                    diarization_enabled=diarization_enabled,
+                    diarization_mode=diarization_mode,
                 )
 
                 if result.success:
-                    from .transcribe import save_transcript, export_timestamped_txt, export_srt
+                    from .transcribe import (
+                        save_transcript,
+                        export_timestamped_txt,
+                        export_srt,
+                        stitch_transcript_boundary_with_previous,
+                        refresh_result_from_saved_transcript,
+                    )
                     save_transcript(result)
+                    if result.transcript_file and stitch_enabled:
+                        stitched = stitch_transcript_boundary_with_previous(
+                            result.transcript_file,
+                            max_gap_seconds=stitch_max_gap_seconds,
+                            min_text_overlap_chars=stitch_min_text_overlap_chars,
+                        )
+                        if stitched:
+                            refresh_result_from_saved_transcript(result)
                     if output_format == "timestamped-txt":
                         export_timestamped_txt(result)
                     elif output_format == "srt":
@@ -1073,17 +1123,37 @@ def rag_check(ctx: click.Context, config: Optional[Path]) -> None:
         sys.exit(1)
 
     ok = True
-    if embedding.check_health():
-        console.print("[green]✓[/green] Embedding endpoint reachable")
-    else:
+    probe_vector_dim: int | None = None
+    try:
+        probe = embedding.embed_text("radio check")
+        probe_vector_dim = len(probe.vector)
+        console.print(
+            f"[green]✓[/green] Embedding endpoint reachable "
+            f"(model={probe.model}, dim={probe_vector_dim})"
+        )
+    except Exception as exc:
         ok = False
-        console.print("[red]✗[/red] Embedding endpoint unavailable")
+        console.print(f"[red]✗[/red] Embedding endpoint unavailable: {exc}")
 
     if vector_store.check_health():
         console.print("[green]✓[/green] Vector store reachable")
     else:
         ok = False
         console.print("[red]✗[/red] Vector store unavailable")
+
+    expected_dim = cfg.rag.vector_store.embedding_dim
+    if probe_vector_dim is not None:
+        if probe_vector_dim == expected_dim:
+            console.print(
+                f"[green]✓[/green] Embedding dimension matches vector store config ({expected_dim})"
+            )
+        else:
+            ok = False
+            console.print(
+                "[red]✗[/red] Embedding dimension mismatch: "
+                f"endpoint returned {probe_vector_dim}, "
+                f"but rag.vector_store.embedding_dim is {expected_dim}"
+            )
 
     if not ok:
         sys.exit(1)

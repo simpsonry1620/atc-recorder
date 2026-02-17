@@ -223,13 +223,19 @@ class TranscriptIngestionService:
 
         if isinstance(segments, list) and segments:
             for idx, seg in enumerate(segments):
-                text = _safe_text(seg.get("text"))
+                if bool(seg.get("skip_for_ingest", False)):
+                    continue
+                text = _safe_text(seg.get("stitched_canonical_text") or seg.get("text"))
                 if not text:
                     continue
                 start_s = float(seg.get("start_time", 0.0))
                 end_s = float(seg.get("end_time", start_s))
                 start_dt = recording_start + timedelta(seconds=max(0.0, start_s))
                 end_dt = recording_start + timedelta(seconds=max(start_s, end_s))
+                quality_flags = _quality_flags_for_text(text)
+                role = seg.get("speaker_role")
+                if isinstance(role, str) and role:
+                    quality_flags.append(f"role:{role.lower()}")
                 docs.append(
                     TranscriptDocument(
                         doc_id=_doc_id(audio_file, idx, start_s, end_s),
@@ -239,7 +245,7 @@ class TranscriptIngestionService:
                         start_time_utc=start_dt,
                         end_time_utc=end_dt,
                         text=text,
-                        quality_flags=_quality_flags_for_text(text),
+                        quality_flags=quality_flags,
                     )
                 )
         else:

@@ -6,8 +6,9 @@ import re
 import subprocess
 import tempfile
 import time
+import hashlib
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from enum import Enum
 from pathlib import Path
 from typing import Optional, Callable
@@ -16,6 +17,164 @@ from .config import Config
 from .logging import get_logger
 
 logger = get_logger(__name__)
+
+_ATC_ROLE_PATTERNS = [
+    re.compile(r"\bcleared\b", re.IGNORECASE),
+    re.compile(r"\bcontact\b", re.IGNORECASE),
+    re.compile(r"\brunway\b", re.IGNORECASE),
+    re.compile(r"\bwind\b", re.IGNORECASE),
+    re.compile(r"\bline up(?: and)? wait\b", re.IGNORECASE),
+    re.compile(r"\bhold short\b", re.IGNORECASE),
+    re.compile(r"\btaxi\b", re.IGNORECASE),
+    re.compile(r"\bmaintain\b", re.IGNORECASE),
+]
+
+_PILOT_ROLE_PATTERNS = [
+    re.compile(r"\bwith you\b", re.IGNORECASE),
+    re.compile(r"\bready\b", re.IGNORECASE),
+    re.compile(r"\brequest\b", re.IGNORECASE),
+    re.compile(r"\bchecking in\b", re.IGNORECASE),
+    re.compile(r"\bvisual\b", re.IGNORECASE),
+    re.compile(r"\bcopy\b", re.IGNORECASE),
+    re.compile(r"\broger\b", re.IGNORECASE),
+]
+
+
+def _stable_stitch_group_id(left_audio: str, right_audio: str, left_idx: int, right_idx: int) -> str:
+    raw = f"{left_audio}:{left_idx}->{right_audio}:{right_idx}"
+    return "stitch_" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
+
+
+def _coerce_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _clean_text(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return " ".join(value.strip().split())
+
+
+def _classify_speaker_role(text: str) -> tuple[str, float]:
+    """Classify ATC role label for a transcript segment."""
+    cleaned = _clean_text(text)
+    if not cleaned:
+        return "UNKNOWN", 0.0
+
+    atc_hits = sum(1 for p in _ATC_ROLE_PATTERNS if p.search(cleaned))
+    pilot_hits = sum(1 for p in _PILOT_ROLE_PATTERNS if p.search(cleaned))
+
+    if atc_hits == 0 and pilot_hits == 0:
+        return "UNKNOWN", 0.35
+    if atc_hits > pilot_hits:
+        return "ATC", min(0.95, 0.60 + 0.10 * atc_hits)
+    if pilot_hits > atc_hits:
+        return "PILOT", min(0.95, 0.60 + 0.10 * pilot_hits)
+    return "UNKNOWN", 0.45
+
+
+def apply_role_diarization(
+    segments: list[dict],
+    enabled: bool = False,
+    mode: str = "role-heuristic",
+) -> list[dict]:
+    """Annotate segments with role-level diarization labels."""
+    if not enabled or mode != "role-heuristic":
+        return segments
+
+    for segment in segments:
+        role, confidence = _classify_speaker_role(segment.get("text", ""))
+        segment["speaker_role"] = role
+        segment["speaker_confidence"] = round(confidence, 3)
+        if role == "ATC":
+            segment["speaker_id"] = "spk_atc"
+        elif role == "PILOT":
+            segment["speaker_id"] = "spk_pilot"
+        else:
+            segment["speaker_id"] = "spk_unknown"
+    return segments
+
+
+def _merge_boundary_text(previous_text: str, current_text: str, min_overlap_chars: int) -> tuple[str, int]:
+    """Merge boundary text while removing duplicated overlap suffix/prefix."""
+    left = _clean_text(previous_text)
+    right = _clean_text(current_text)
+    if not left:
+        return right, 0
+    if not right:
+        return left, 0
+
+    max_overlap = min(len(left), len(right), 120)
+    overlap_chars = 0
+    for n in range(max_overlap, min_overlap_chars - 1, -1):
+        if left[-n:].lower() == right[:n].lower():
+            overlap_chars = n
+            break
+
+    if overlap_chars > 0:
+        merged = f"{left} {right[overlap_chars:].lstrip()}".strip()
+        return merged, overlap_chars
+    return f"{left} {right}".strip(), 0
+
+
+def _find_metadata_entry(metadata_path: Path, audio_file_name: str) -> Optional[dict]:
+    if not metadata_path.exists():
+        return None
+    try:
+        data = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if isinstance(data, dict):
+        data = [data]
+    if not isinstance(data, list):
+        return None
+    for item in data:
+        if isinstance(item, dict) and item.get("file") == audio_file_name:
+            return item
+    return None
+
+
+def _resolve_audio_start_time(transcript_path: Path, audio_file_name: str) -> Optional[datetime]:
+    metadata_entry = _find_metadata_entry(transcript_path.parent / "metadata.json", audio_file_name)
+    if metadata_entry and metadata_entry.get("start_time"):
+        try:
+            return datetime.fromisoformat(str(metadata_entry["start_time"]).replace("Z", "+00:00")).astimezone(timezone.utc)
+        except Exception:
+            pass
+
+    stem = Path(audio_file_name).stem
+    pieces = stem.split("_")
+    if len(pieces) >= 3:
+        date_part = pieces[-2]
+        time_part = pieces[-1].rstrip("Z")
+        try:
+            return datetime.strptime(f"{date_part} {time_part}", "%Y-%m-%d %H%M").replace(tzinfo=timezone.utc)
+        except ValueError:
+            return None
+    return None
+
+
+def _ordered_transcript_audio_pairs(directory: Path) -> list[tuple[Path, str]]:
+    pairs: list[tuple[Path, str, datetime]] = []
+    for transcript_path in sorted(directory.glob("*.json")):
+        if transcript_path.name == "metadata.json":
+            continue
+        try:
+            payload = json.loads(transcript_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        audio_file = payload.get("audio_file")
+        if not isinstance(audio_file, str) or not audio_file:
+            continue
+        start_dt = _resolve_audio_start_time(transcript_path, audio_file)
+        if start_dt is None:
+            continue
+        pairs.append((transcript_path, audio_file, start_dt))
+    pairs.sort(key=lambda item: item[2])
+    return [(p[0], p[1]) for p in pairs]
 
 
 class AudioPreprocess(Enum):
@@ -552,6 +711,8 @@ class WhisperClient:
         silence_threshold_dB: float = -30.0,
         min_speech_duration: float = 0.3,
         merge_gap_seconds: float = 0.5,
+        diarization_enabled: bool = False,
+        diarization_mode: str = "role-heuristic",
     ) -> TranscriptionResult:
         """Convert audio to WAV and transcribe.
 
@@ -649,6 +810,8 @@ class WhisperClient:
                     silence_threshold_dB=silence_threshold_dB,
                     min_speech_duration=min_speech_duration,
                     merge_gap_seconds=merge_gap_seconds,
+                    diarization_enabled=diarization_enabled,
+                    diarization_mode=diarization_mode,
                 )
             
             # Check file size - gRPC has a 4MB limit
@@ -661,11 +824,21 @@ class WhisperClient:
                 # Small file - transcribe directly
                 transcription = self.transcribe_file(wav_path)
                 transcription.audio_file = audio_path
+                apply_role_diarization(
+                    transcription.segments,
+                    enabled=diarization_enabled,
+                    mode=diarization_mode,
+                )
                 return transcription
             else:
                 # Large file - transcribe in chunks
                 logger.info(f"Large file ({wav_size / 1024 / 1024:.1f}MB), transcribing in chunks")
                 transcription = self._transcribe_chunked(wav_path, audio_path)
+                apply_role_diarization(
+                    transcription.segments,
+                    enabled=diarization_enabled,
+                    mode=diarization_mode,
+                )
                 return transcription
             
         finally:
@@ -783,6 +956,8 @@ class WhisperClient:
         silence_threshold_dB: float = -30.0,
         min_speech_duration: float = 0.3,
         merge_gap_seconds: float = 0.5,
+        diarization_enabled: bool = False,
+        diarization_mode: str = "role-heuristic",
     ) -> TranscriptionResult:
         """Transcribe by segmenting on silence, then transcribing each speech interval.
 
@@ -893,7 +1068,11 @@ class WhisperClient:
             text=" ".join(all_text).strip(),
             language=self.language_code,
             duration_seconds=duration,
-            segments=all_segments,
+            segments=apply_role_diarization(
+                all_segments,
+                enabled=diarization_enabled,
+                mode=diarization_mode,
+            ),
             transcribed_at=datetime.now(timezone.utc),
         )
 
@@ -1066,6 +1245,138 @@ def save_transcript(result: TranscriptionResult, output_path: Optional[Path] = N
     return output_path
 
 
+def stitch_transcript_boundary_with_previous(
+    transcript_path: Path,
+    max_gap_seconds: float = 2.0,
+    min_text_overlap_chars: int = 12,
+) -> bool:
+    """Stitch boundary text between previous transcript and current transcript.
+
+    Returns True when a boundary stitch was applied.
+    """
+    transcript_path = Path(transcript_path)
+    if not transcript_path.exists():
+        return False
+
+    try:
+        current_data = json.loads(transcript_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+
+    current_audio = current_data.get("audio_file")
+    current_segments = current_data.get("segments")
+    if not isinstance(current_audio, str) or not isinstance(current_segments, list) or not current_segments:
+        return False
+
+    ordered_pairs = _ordered_transcript_audio_pairs(transcript_path.parent)
+    idx = next((i for i, (p, _) in enumerate(ordered_pairs) if p == transcript_path), -1)
+    if idx <= 0:
+        return False
+    prev_path, prev_audio = ordered_pairs[idx - 1]
+
+    try:
+        prev_data = json.loads(prev_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    prev_segments = prev_data.get("segments")
+    if not isinstance(prev_segments, list) or not prev_segments:
+        return False
+
+    prev_start = _resolve_audio_start_time(prev_path, prev_audio)
+    curr_start = _resolve_audio_start_time(transcript_path, current_audio)
+    if prev_start is None or curr_start is None:
+        return False
+
+    prev_last_idx = len(prev_segments) - 1
+    prev_last = prev_segments[prev_last_idx]
+    curr_first_idx = 0
+    curr_first = current_segments[curr_first_idx]
+    prev_last_end = _coerce_float(prev_last.get("end_time"), 0.0)
+    prev_last_abs_end = prev_start + timedelta(seconds=max(0.0, prev_last_end))
+    gap_seconds = (curr_start - prev_last_abs_end).total_seconds()
+    if gap_seconds < -max_gap_seconds or gap_seconds > max_gap_seconds:
+        return False
+
+    merged_text, overlap_chars = _merge_boundary_text(
+        previous_text=str(prev_last.get("text", "")),
+        current_text=str(curr_first.get("text", "")),
+        min_overlap_chars=min_text_overlap_chars,
+    )
+    if not merged_text:
+        return False
+
+    stitch_id = _stable_stitch_group_id(prev_audio, current_audio, prev_last_idx, curr_first_idx)
+
+    prev_last["stitch_next"] = {
+        "stitch_group_id": stitch_id,
+        "audio_file": current_audio,
+        "segment_index": curr_first_idx,
+        "gap_seconds": round(gap_seconds, 3),
+    }
+    prev_last["stitched_canonical_text"] = merged_text
+    prev_last["skip_for_ingest"] = True
+
+    curr_first["text"] = merged_text
+    curr_first["stitched_with_previous"] = {
+        "stitch_group_id": stitch_id,
+        "audio_file": prev_audio,
+        "segment_index": prev_last_idx,
+        "gap_seconds": round(gap_seconds, 3),
+        "overlap_chars": overlap_chars,
+    }
+    curr_first["source_audio_files"] = [prev_audio, current_audio]
+    curr_first["source_segment_refs"] = [
+        {"audio_file": prev_audio, "segment_index": prev_last_idx},
+        {"audio_file": current_audio, "segment_index": curr_first_idx},
+    ]
+
+    prev_data["segments"] = prev_segments
+    current_data["segments"] = current_segments
+    prev_data["text"] = " ".join(_clean_text(seg.get("text", "")) for seg in prev_segments).strip()
+    current_data["text"] = " ".join(_clean_text(seg.get("text", "")) for seg in current_segments).strip()
+
+    prev_path.write_text(json.dumps(prev_data, indent=2, ensure_ascii=False), encoding="utf-8")
+    transcript_path.write_text(json.dumps(current_data, indent=2, ensure_ascii=False), encoding="utf-8")
+    return True
+
+
+def stitch_transcripts_in_directory(
+    directory: Path,
+    max_gap_seconds: float = 2.0,
+    min_text_overlap_chars: int = 12,
+) -> int:
+    """Stitch adjacent transcript boundaries for one feed/date directory."""
+    directory = Path(directory)
+    if not directory.exists():
+        return 0
+    stitched_count = 0
+    ordered_pairs = _ordered_transcript_audio_pairs(directory)
+    for transcript_path, _audio_file in ordered_pairs[1:]:
+        if stitch_transcript_boundary_with_previous(
+            transcript_path,
+            max_gap_seconds=max_gap_seconds,
+            min_text_overlap_chars=min_text_overlap_chars,
+        ):
+            stitched_count += 1
+    return stitched_count
+
+
+def refresh_result_from_saved_transcript(result: TranscriptionResult) -> None:
+    """Reload text/segments from saved transcript JSON into an in-memory result."""
+    if not result.transcript_file or not result.transcript_file.exists():
+        return
+    try:
+        payload = json.loads(result.transcript_file.read_text(encoding="utf-8"))
+    except Exception:
+        return
+    segments = payload.get("segments")
+    text = payload.get("text")
+    if isinstance(segments, list):
+        result.segments = segments
+    if isinstance(text, str):
+        result.text = text
+
+
 class TranscriptionWatcher:
     """Watch for new audio files and transcribe them automatically."""
 
@@ -1082,6 +1393,11 @@ class TranscriptionWatcher:
         merge_gap_seconds: float = 0.5,
         output_format: str = "json",
         on_transcript_saved: Optional[Callable[[Path], None]] = None,
+        diarization_enabled: bool = False,
+        diarization_mode: str = "role-heuristic",
+        stitch_across_files: bool = False,
+        stitch_max_gap_seconds: float = 2.0,
+        stitch_min_text_overlap_chars: int = 12,
     ):
         """Initialize the watcher.
 
@@ -1114,6 +1430,11 @@ class TranscriptionWatcher:
         self._merge_gap_seconds = merge_gap_seconds
         self._output_format = output_format
         self._on_transcript_saved = on_transcript_saved
+        self._diarization_enabled = diarization_enabled
+        self._diarization_mode = diarization_mode
+        self._stitch_across_files = stitch_across_files
+        self._stitch_max_gap_seconds = stitch_max_gap_seconds
+        self._stitch_min_text_overlap_chars = stitch_min_text_overlap_chars
         self._observer = None
         self._running = False
     
@@ -1162,10 +1483,24 @@ class TranscriptionWatcher:
                 silence_threshold_dB=self._silence_threshold_dB,
                 min_speech_duration=self._min_speech_duration,
                 merge_gap_seconds=self._merge_gap_seconds,
+                diarization_enabled=self._diarization_enabled,
+                diarization_mode=self._diarization_mode,
             )
 
             if result.success:
                 save_transcript(result)
+                if result.transcript_file and self._stitch_across_files:
+                    try:
+                        stitched = stitch_transcript_boundary_with_previous(
+                            result.transcript_file,
+                            max_gap_seconds=self._stitch_max_gap_seconds,
+                            min_text_overlap_chars=self._stitch_min_text_overlap_chars,
+                        )
+                        if stitched:
+                            logger.info(f"Boundary stitched: {result.transcript_file}")
+                            refresh_result_from_saved_transcript(result)
+                    except Exception as exc:
+                        logger.error(f"Boundary stitching failed for {result.transcript_file}: {exc}")
                 logger.info(f"Transcription saved: {result.transcript_file}")
                 if result.transcript_file and self._on_transcript_saved:
                     try:
@@ -1248,6 +1583,11 @@ def transcribe_file(
     merge_gap_seconds: float = 0.5,
     output_format: str = "json",
     periodic_timestamp_interval_sec: float = 0,
+    diarization_enabled: bool = False,
+    diarization_mode: str = "role-heuristic",
+    stitch_across_files: bool = False,
+    stitch_max_gap_seconds: float = 2.0,
+    stitch_min_text_overlap_chars: int = 12,
 ) -> TranscriptionResult:
     """Convenience function to transcribe a single file.
 
@@ -1289,10 +1629,20 @@ def transcribe_file(
         silence_threshold_dB=silence_threshold_dB,
         min_speech_duration=min_speech_duration,
         merge_gap_seconds=merge_gap_seconds,
+        diarization_enabled=diarization_enabled,
+        diarization_mode=diarization_mode,
     )
 
     if save and result.success:
         save_transcript(result)
+        if result.transcript_file and stitch_across_files:
+            stitched = stitch_transcript_boundary_with_previous(
+                result.transcript_file,
+                max_gap_seconds=stitch_max_gap_seconds,
+                min_text_overlap_chars=stitch_min_text_overlap_chars,
+            )
+            if stitched:
+                refresh_result_from_saved_transcript(result)
         if output_format == "timestamped-txt":
             export_timestamped_txt(
                 result,
@@ -1316,6 +1666,11 @@ def watch_and_transcribe(
     merge_gap_seconds: float = 0.5,
     output_format: str = "json",
     on_transcript_saved: Optional[Callable[[Path], None]] = None,
+    diarization_enabled: bool = False,
+    diarization_mode: str = "role-heuristic",
+    stitch_across_files: bool = False,
+    stitch_max_gap_seconds: float = 2.0,
+    stitch_min_text_overlap_chars: int = 12,
 ) -> None:
     """Watch a directory and transcribe new audio files.
 
@@ -1359,6 +1714,11 @@ def watch_and_transcribe(
         merge_gap_seconds=merge_gap_seconds,
         output_format=output_format,
         on_transcript_saved=on_transcript_saved,
+        diarization_enabled=diarization_enabled,
+        diarization_mode=diarization_mode,
+        stitch_across_files=stitch_across_files,
+        stitch_max_gap_seconds=stitch_max_gap_seconds,
+        stitch_min_text_overlap_chars=stitch_min_text_overlap_chars,
     )
 
     watcher.run_forever()
@@ -1427,6 +1787,11 @@ def transcribe_all(
     min_speech_duration: float = 0.3,
     merge_gap_seconds: float = 0.5,
     output_format: str = "json",
+    diarization_enabled: bool = False,
+    diarization_mode: str = "role-heuristic",
+    stitch_across_files: bool = False,
+    stitch_max_gap_seconds: float = 2.0,
+    stitch_min_text_overlap_chars: int = 12,
 ) -> list[TranscriptionResult]:
     """Transcribe audio files in a directory.
 
@@ -1493,10 +1858,21 @@ def transcribe_all(
                 silence_threshold_dB=silence_threshold_dB,
                 min_speech_duration=min_speech_duration,
                 merge_gap_seconds=merge_gap_seconds,
+                diarization_enabled=diarization_enabled,
+                diarization_mode=diarization_mode,
             )
 
             if result.success:
                 save_transcript(result)
+                if result.transcript_file and stitch_across_files:
+                    stitched = stitch_transcript_boundary_with_previous(
+                        result.transcript_file,
+                        max_gap_seconds=stitch_max_gap_seconds,
+                        min_text_overlap_chars=stitch_min_text_overlap_chars,
+                    )
+                    if stitched:
+                        logger.info(f"  Boundary stitched: {result.transcript_file.name}")
+                        refresh_result_from_saved_transcript(result)
                 logger.info(f"  Saved: {result.transcript_file}")
                 if output_format == "timestamped-txt":
                     out = export_timestamped_txt(result)
