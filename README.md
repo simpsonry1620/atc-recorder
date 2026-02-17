@@ -108,6 +108,14 @@ recording:
   enabled: true
   reconnect_delay: 30
   max_retries: 5
+
+transcription:
+  segment_by_pauses: false
+  min_silence_duration: 0.5
+  silence_threshold_dB: -30
+  min_speech_duration: 0.3
+  merge_gap_seconds: 0.5
+  output_format: json  # json | timestamped-txt | srt
 ```
 
 ## Output Structure
@@ -173,6 +181,7 @@ The project includes NVIDIA Whisper ASR integration for automatic transcription 
 - NVIDIA GPU with CUDA support
 - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
 - NGC API Key from [NVIDIA Build](https://build.nvidia.com/openai/whisper-large-v3)
+- `sox` (optional, for `transcribe-compare` sox preprocessing method)
 
 #### Setup
 
@@ -207,6 +216,12 @@ The project includes NVIDIA Whisper ASR integration for automatic transcription 
 # Transcribe an audio file
 docker compose run --rm atc-recorder transcribe recordings/kdca1_gnd/2026-02-04/kdca1_gnd_2026-02-04_1200Z.mp3
 
+# Segment by pauses (one segment per utterance) and write timestamped .txt
+docker compose run --rm atc-recorder transcribe --segment-by-pauses --output-format timestamped-txt recordings/.../file.mp3
+
+# Also export SRT subtitles
+docker compose run --rm atc-recorder transcribe --segment-by-pauses --output-format srt recordings/.../file.mp3
+
 # Check connection to Whisper service
 docker compose run --rm atc-recorder transcribe --check recordings/any-file.mp3
 ```
@@ -223,9 +238,39 @@ docker compose --profile asr up -d
 docker compose logs -f transcription-worker
 ```
 
+The worker reads optional `transcription` settings from `config.yaml` (pause segmentation thresholds and output format).
+
+#### Transcribe Existing Recordings
+
+Use the batch command to process files already on disk:
+
+```bash
+# Transcribe only files that do not have JSON transcripts yet
+docker compose run --rm atc-recorder transcribe-all
+
+# Show what would be transcribed, without running ASR
+docker compose run --rm atc-recorder transcribe-all --dry-run
+
+# Re-transcribe all audio files, including ones with existing transcripts
+docker compose run --rm atc-recorder transcribe-all --force
+
+# Batch mode with pause segmentation and SRT export
+docker compose run --rm atc-recorder transcribe-all --segment-by-pauses --output-format srt
+```
+
+#### Compare Audio Preprocessing Methods
+
+To evaluate transcript quality with different preprocessing chains:
+
+```bash
+docker compose run --rm atc-recorder transcribe-compare recordings/.../file.mp3
+```
+
+This creates multiple transcript files (for example `*_transcript_none.json`, `*_transcript_ffmpeg.json`, and `*_transcript_ffmpeg_vad.json`; `*_transcript_sox.json` is included when `sox` is available) so you can compare recognition quality.
+
 #### Output
 
-Transcripts are saved as JSON files alongside the audio files:
+Transcripts are always saved as JSON files alongside the audio files:
 
 ```
 recordings/
@@ -247,6 +292,71 @@ Transcript JSON format:
   "transcribed_at": "2026-02-04T12:35:00Z"
 }
 ```
+
+**Timestamped segments and export formats:** Use `--segment-by-pauses` to split the transcript by silence (e.g. between ATC and pilot) so each segment has `start_time` and `end_time` in seconds. This works even when the ASR service does not return word-level timings. With `--output-format timestamped-txt` or `--output-format srt`, an additional file is written alongside the JSON: a timestamped text file (`[MM:SS.mmm] - [MM:SS.mmm] text`) or SRT subtitles. You can set `transcription` options in `config.yaml` so the transcription worker uses the same behavior automatically.
+
+### Streaming-to-RAG (Phase 1)
+
+The project supports a Phase 1 RAG workflow aligned with NVIDIA's streaming blueprint:
+
+- Real-time ingestion of saved transcript JSON files
+- Segment-level embeddings and Milvus indexing
+- Time-window and feed/channel filtering during semantic search
+- Minimal HTTP search API for downstream tools
+
+#### Enable RAG in config
+
+Add and customize `rag` settings in `config.yaml`:
+
+```yaml
+rag:
+  enabled: true
+  ingest_on_transcribe: true
+  embedding:
+    provider: nvidia-nim
+    endpoint: http://embedding-nim:8000/v1/embeddings
+    model: nvidia/llama-3_2-nv-embedqa-1b-v2
+    api_key_env: NVIDIA_API_KEY
+  vector_store:
+    provider: milvus
+    host: milvus-standalone
+    port: 19530
+    collection_name: atc_transcripts
+    embedding_dim: 2048
+```
+
+#### Start RAG services
+
+```bash
+# Start Milvus + API (rag profile)
+docker compose --profile rag up -d milvus-etcd milvus-minio milvus-standalone rag-api
+
+# Backfill existing transcript JSON files
+docker compose run --rm atc-recorder ingest-transcripts
+
+# Validate embedding + vector connectivity
+docker compose run --rm atc-recorder rag-check
+```
+
+#### Query by time and channel
+
+```bash
+# CLI semantic search
+docker compose run --rm atc-recorder search "runway change discussion" --feed-id kdca1_twr --top-k 5
+
+# API semantic search
+curl -s http://localhost:8100/search \
+  -H "Content-Type: application/json" \
+  -d '{
+    "query":"summarize departure congestion",
+    "feed_ids":["kdca1_dep"],
+    "start_time":"2026-02-13T00:00:00Z",
+    "end_time":"2026-02-13T23:59:59Z",
+    "top_k":10
+  }'
+```
+
+When `rag.ingest_on_transcribe: true`, the transcription watcher automatically ingests each newly saved transcript into Milvus and the metadata index.
 
 ### Environment Configuration
 

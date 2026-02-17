@@ -18,6 +18,67 @@ class RecordingConfig:
 
 
 @dataclass
+class TranscriptionConfig:
+    """Configuration for transcription (segment-by-pauses, export format)."""
+    
+    segment_by_pauses: bool = False
+    min_silence_duration: float = 0.5
+    silence_threshold_dB: float = -30.0
+    min_speech_duration: float = 0.3
+    merge_gap_seconds: float = 0.5
+    output_format: str = "json"  # json, timestamped-txt, srt
+
+
+@dataclass
+class EmbeddingConfig:
+    """Embedding endpoint configuration."""
+
+    provider: str = "nvidia-nim"
+    endpoint: str = "http://localhost:9080/v1/embeddings"
+    model: str = "nvidia/llama-3_2-nv-embedqa-1b-v2"
+    api_key_env: str = "NVIDIA_API_KEY"
+    timeout_seconds: float = 15.0
+    max_retries: int = 3
+    retry_backoff_seconds: float = 1.0
+
+
+@dataclass
+class VectorStoreConfig:
+    """Vector store configuration."""
+
+    provider: str = "milvus"
+    host: str = "localhost"
+    port: int = 19530
+    collection_name: str = "atc_transcripts"
+    embedding_dim: int = 2048
+    metric_type: str = "COSINE"
+    index_type: str = "HNSW"
+    use_tls: bool = False
+    sqlite_metadata_path: str = "./recordings/rag_metadata.db"
+
+
+@dataclass
+class RagApiConfig:
+    """Search API configuration."""
+
+    host: str = "0.0.0.0"
+    port: int = 8100
+    top_k_default: int = 10
+    top_k_max: int = 50
+
+
+@dataclass
+class RagConfig:
+    """RAG ingestion and retrieval configuration."""
+
+    enabled: bool = False
+    ingest_on_transcribe: bool = False
+    embedding: EmbeddingConfig = field(default_factory=EmbeddingConfig)
+    vector_store: VectorStoreConfig = field(default_factory=VectorStoreConfig)
+    api: RagApiConfig = field(default_factory=RagApiConfig)
+
+
+@dataclass
 class Config:
     """Main configuration for ATC Recorder."""
     
@@ -25,6 +86,8 @@ class Config:
     segment_duration: int = 1800  # 30 minutes in seconds
     feeds: list[str] = field(default_factory=list)
     recording: RecordingConfig = field(default_factory=RecordingConfig)
+    transcription: Optional[TranscriptionConfig] = None
+    rag: Optional[RagConfig] = None
     request_delay: float = 1.0  # delay between requests in seconds
     user_agent: str = "ATC-Recorder/0.1.0"
     
@@ -64,6 +127,59 @@ class Config:
             max_retries=recording_data.get('max_retries', 5),
             segment_duration=recording_data.get('segment_duration', 1800),
         )
+
+        transcription_config = None
+        if 'transcription' in data:
+            t = data['transcription']
+            transcription_config = TranscriptionConfig(
+                segment_by_pauses=t.get('segment_by_pauses', False),
+                min_silence_duration=t.get('min_silence_duration', 0.5),
+                silence_threshold_dB=t.get('silence_threshold_dB', -30.0),
+                min_speech_duration=t.get('min_speech_duration', 0.3),
+                merge_gap_seconds=t.get('merge_gap_seconds', 0.5),
+                output_format=t.get('output_format', 'json'),
+            )
+
+        rag_config = None
+        if "rag" in data:
+            rag_data = data.get("rag", {})
+            emb_data = rag_data.get("embedding", {})
+            vs_data = rag_data.get("vector_store", {})
+            api_data = rag_data.get("api", {})
+
+            rag_config = RagConfig(
+                enabled=rag_data.get("enabled", False),
+                ingest_on_transcribe=rag_data.get("ingest_on_transcribe", False),
+                embedding=EmbeddingConfig(
+                    provider=emb_data.get("provider", "nvidia-nim"),
+                    endpoint=emb_data.get("endpoint", "http://localhost:9080/v1/embeddings"),
+                    model=emb_data.get("model", "nvidia/llama-3_2-nv-embedqa-1b-v2"),
+                    api_key_env=emb_data.get("api_key_env", "NVIDIA_API_KEY"),
+                    timeout_seconds=emb_data.get("timeout_seconds", 15.0),
+                    max_retries=emb_data.get("max_retries", 3),
+                    retry_backoff_seconds=emb_data.get("retry_backoff_seconds", 1.0),
+                ),
+                vector_store=VectorStoreConfig(
+                    provider=vs_data.get("provider", "milvus"),
+                    host=vs_data.get("host", "localhost"),
+                    port=vs_data.get("port", 19530),
+                    collection_name=vs_data.get("collection_name", "atc_transcripts"),
+                    embedding_dim=vs_data.get("embedding_dim", 2048),
+                    metric_type=vs_data.get("metric_type", "COSINE"),
+                    index_type=vs_data.get("index_type", "HNSW"),
+                    use_tls=vs_data.get("use_tls", False),
+                    sqlite_metadata_path=vs_data.get(
+                        "sqlite_metadata_path",
+                        "./recordings/rag_metadata.db",
+                    ),
+                ),
+                api=RagApiConfig(
+                    host=api_data.get("host", "0.0.0.0"),
+                    port=api_data.get("port", 8100),
+                    top_k_default=api_data.get("top_k_default", 10),
+                    top_k_max=api_data.get("top_k_max", 50),
+                ),
+            )
         
         output_dir = data.get('output_dir', './recordings')
         if isinstance(output_dir, str):
@@ -74,6 +190,8 @@ class Config:
             segment_duration=data.get('segment_duration', 1800),
             feeds=data.get('feeds', []),
             recording=recording_config,
+            transcription=transcription_config,
+            rag=rag_config,
             request_delay=data.get('request_delay', 1.0),
             user_agent=data.get('user_agent', 'ATC-Recorder/0.1.0'),
         )
@@ -84,7 +202,7 @@ class Config:
         Returns:
             Configuration dictionary
         """
-        return {
+        d = {
             'output_dir': str(self.output_dir),
             'segment_duration': self.segment_duration,
             'feeds': self.feeds,
@@ -97,6 +215,47 @@ class Config:
             'request_delay': self.request_delay,
             'user_agent': self.user_agent,
         }
+        if self.transcription is not None:
+            d['transcription'] = {
+                'segment_by_pauses': self.transcription.segment_by_pauses,
+                'min_silence_duration': self.transcription.min_silence_duration,
+                'silence_threshold_dB': self.transcription.silence_threshold_dB,
+                'min_speech_duration': self.transcription.min_speech_duration,
+                'merge_gap_seconds': self.transcription.merge_gap_seconds,
+                'output_format': self.transcription.output_format,
+            }
+        if self.rag is not None:
+            d["rag"] = {
+                "enabled": self.rag.enabled,
+                "ingest_on_transcribe": self.rag.ingest_on_transcribe,
+                "embedding": {
+                    "provider": self.rag.embedding.provider,
+                    "endpoint": self.rag.embedding.endpoint,
+                    "model": self.rag.embedding.model,
+                    "api_key_env": self.rag.embedding.api_key_env,
+                    "timeout_seconds": self.rag.embedding.timeout_seconds,
+                    "max_retries": self.rag.embedding.max_retries,
+                    "retry_backoff_seconds": self.rag.embedding.retry_backoff_seconds,
+                },
+                "vector_store": {
+                    "provider": self.rag.vector_store.provider,
+                    "host": self.rag.vector_store.host,
+                    "port": self.rag.vector_store.port,
+                    "collection_name": self.rag.vector_store.collection_name,
+                    "embedding_dim": self.rag.vector_store.embedding_dim,
+                    "metric_type": self.rag.vector_store.metric_type,
+                    "index_type": self.rag.vector_store.index_type,
+                    "use_tls": self.rag.vector_store.use_tls,
+                    "sqlite_metadata_path": self.rag.vector_store.sqlite_metadata_path,
+                },
+                "api": {
+                    "host": self.rag.api.host,
+                    "port": self.rag.api.port,
+                    "top_k_default": self.rag.api.top_k_default,
+                    "top_k_max": self.rag.api.top_k_max,
+                },
+            }
+        return d
     
     def save(self, path: Path) -> None:
         """Save configuration to a YAML file.

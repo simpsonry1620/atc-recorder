@@ -27,6 +27,8 @@ try:
         watch_and_transcribe,
         find_untranscribed_files,
         transcribe_all as do_transcribe_all,
+        compare_preprocessing,
+        AudioPreprocess,
         RIVA_AVAILABLE,
         WATCHDOG_AVAILABLE,
     )
@@ -40,6 +42,29 @@ except ImportError:
 console = Console()
 
 
+def _build_transcript_ingest_callback(cfg: Config):
+    """Create callback for auto-ingesting transcripts when enabled."""
+    rag = getattr(cfg, "rag", None)
+    if not rag or not rag.enabled or not rag.ingest_on_transcribe:
+        return None
+
+    try:
+        from .ingest import TranscriptIngestionService
+        ingest_service = TranscriptIngestionService(cfg)
+    except Exception as exc:
+        console.print(f"[yellow]RAG ingestion disabled: {exc}[/yellow]")
+        return None
+
+    def _callback(transcript_path: Path) -> None:
+        stats = ingest_service.ingest_transcript(transcript_path)
+        if stats.errors > 0:
+            console.print(f"[red]✗[/red] RAG ingest failed for {transcript_path.name}")
+        else:
+            console.print(f"[green]✓[/green] RAG ingest: {transcript_path.name} ({stats.docs_upserted} docs)")
+
+    return _callback
+
+
 @click.group()
 @click.version_option(version=__version__)
 @click.option('--config', '-c', type=click.Path(exists=True, path_type=Path),
@@ -48,7 +73,7 @@ console = Console()
 def cli(ctx: click.Context, config: Optional[Path]) -> None:
     """ATC Recorder - Record and download ATC audio from LiveATC.net."""
     ctx.ensure_object(dict)
-    ctx.obj['config'] = load_config(config) if config else Config()
+    ctx.obj['config'] = load_config(config)
 
 
 @cli.group()
@@ -543,6 +568,16 @@ def check(quiet: bool, strict: bool) -> None:
               help='Only check connection to Whisper service')
 @click.option('--no-save', is_flag=True,
               help='Do not save transcript to file')
+@click.option('--segment-by-pauses', is_flag=True,
+              help='Segment by silence and timestamp each segment')
+@click.option('--min-silence-duration', default=0.5, type=float,
+              help='Min silence duration (seconds) for pause detection')
+@click.option('--silence-db', default=-30.0, type=float,
+              help='dB level below which audio is considered silence')
+@click.option('--output-format', type=click.Choice(['json', 'timestamped-txt', 'srt']), default='json',
+              help='Output format: json only, or also write timestamped .txt or .srt')
+@click.option('--periodic-markers', default=0, type=float,
+              help='In timestamped-txt, insert marker lines every N seconds (0=off)')
 def transcribe(
     audio_file: Optional[Path],
     host: str,
@@ -550,6 +585,11 @@ def transcribe(
     language: str,
     check_only: bool,
     no_save: bool,
+    segment_by_pauses: bool,
+    min_silence_duration: float,
+    silence_db: float,
+    output_format: str,
+    periodic_markers: float,
 ) -> None:
     """Transcribe an audio file using Whisper ASR.
     
@@ -594,6 +634,11 @@ def transcribe(
             grpc_port=port,
             language_code=language,
             save=not no_save,
+            segment_by_pauses=segment_by_pauses,
+            min_silence_duration=min_silence_duration,
+            silence_threshold_dB=silence_db,
+            output_format=output_format,
+            periodic_timestamp_interval_sec=periodic_markers,
         )
     
     if result.success:
@@ -605,6 +650,14 @@ def transcribe(
         
         if result.transcript_file and not no_save:
             console.print(f"[dim]Saved to: {result.transcript_file}[/dim]")
+            if output_format == 'timestamped-txt':
+                txt_path = result.audio_file.with_suffix('.txt')
+                if txt_path.exists():
+                    console.print(f"[dim]Timestamped text: {txt_path}[/dim]")
+            elif output_format == 'srt':
+                srt_path = result.audio_file.with_suffix('.srt')
+                if srt_path.exists():
+                    console.print(f"[dim]SRT: {srt_path}[/dim]")
     else:
         console.print(f"[red]✗ Transcription failed: {result.error}[/red]")
         sys.exit(1)
@@ -651,20 +704,40 @@ def transcribe_watch(
     
     watch_dir = cfg.output_dir
     
+    # Transcription options from config
+    trans = getattr(cfg, 'transcription', None)
+    segment_by_pauses = trans.segment_by_pauses if trans else False
+    min_silence_duration = trans.min_silence_duration if trans else 0.5
+    silence_db = trans.silence_threshold_dB if trans else -30.0
+    min_speech_duration = trans.min_speech_duration if trans else 0.3
+    merge_gap_seconds = trans.merge_gap_seconds if trans else 0.5
+    output_format = trans.output_format if trans else 'json'
+
     console.print("[bold]ATC Transcription Watcher[/bold]")
     console.print(f"  Watch directory: {watch_dir}")
     console.print(f"  Whisper service: {host}:{port}")
     console.print(f"  Language: {language}")
+    if segment_by_pauses:
+        console.print(f"  Segment by pauses: yes (min_silence={min_silence_duration}s)")
+    console.print(f"  Output format: {output_format}")
     console.print()
     console.print("[dim]Press Ctrl+C to stop[/dim]")
     console.print()
-    
+
     try:
+        ingest_callback = _build_transcript_ingest_callback(cfg)
         watch_and_transcribe(
             watch_dir=watch_dir,
             grpc_host=host,
             grpc_port=port,
             language_code=language,
+            segment_by_pauses=segment_by_pauses,
+            min_silence_duration=min_silence_duration,
+            silence_threshold_dB=silence_db,
+            min_speech_duration=min_speech_duration,
+            merge_gap_seconds=merge_gap_seconds,
+            output_format=output_format,
+            on_transcript_saved=ingest_callback,
         )
     except KeyboardInterrupt:
         pass
@@ -681,6 +754,12 @@ def transcribe_watch(
               help='Whisper gRPC port (env: WHISPER_GRPC_PORT)')
 @click.option('--language', '-l', default='en-US',
               help='Language code (BCP-47 format)')
+@click.option('--force', '-f', is_flag=True,
+              help='Re-transcribe all audio files (overwrite existing transcripts)')
+@click.option('--segment-by-pauses', is_flag=True,
+              help='Segment by silence and timestamp each segment')
+@click.option('--output-format', type=click.Choice(['json', 'timestamped-txt', 'srt']), default='json',
+              help='Output format: json only, or also write .txt or .srt')
 @click.option('--dry-run', is_flag=True,
               help='Show files that would be transcribed without processing')
 @click.pass_context
@@ -690,12 +769,15 @@ def transcribe_all(
     host: str,
     port: int,
     language: str,
+    force: bool,
+    segment_by_pauses: bool,
+    output_format: str,
     dry_run: bool,
 ) -> None:
-    """Transcribe all existing recordings that don't have transcripts.
+    """Transcribe recordings in the recordings directory.
     
-    Finds all MP3 files in the recordings directory that don't have
-    corresponding JSON transcript files and transcribes them.
+    By default only transcribes MP3 files that don't have a transcript yet.
+    Use --force to re-transcribe all audio files (overwrites existing JSON).
     
     Requires the NVIDIA Whisper ASR service to be running.
     """
@@ -711,15 +793,19 @@ def transcribe_all(
     
     recordings_dir = cfg.output_dir
     
-    # Find untranscribed files
-    with console.status("[bold blue]Scanning for untranscribed files..."):
-        files = find_untranscribed_files(recordings_dir)
+    # Find files to transcribe
+    with console.status("[bold blue]Scanning for files..."):
+        if force:
+            from .transcribe import find_audio_files
+            files = find_audio_files(recordings_dir)
+        else:
+            files = find_untranscribed_files(recordings_dir)
     
     if not files:
-        console.print("[green]All recordings have been transcribed![/green]")
+        console.print("[green]No files to transcribe.[/green]" if force else "[green]All recordings have been transcribed![/green]")
         return
     
-    console.print(f"[bold]Found {len(files)} files without transcripts[/bold]")
+    console.print(f"[bold]Found {len(files)} files to transcribe[/bold]" + (" (force)" if force else ""))
     console.print()
     
     if dry_run:
@@ -730,21 +816,24 @@ def transcribe_all(
     
     console.print(f"  Whisper service: {host}:{port}")
     console.print(f"  Language: {language}")
+    if segment_by_pauses:
+        console.print("  Segment by pauses: yes")
+    console.print(f"  Output format: {output_format}")
     console.print()
-    
+
     # Check connection first
     client = WhisperClient(grpc_host=host, grpc_port=port, language_code=language)
-    with console.status(f"[bold blue]Connecting to Whisper service..."):
+    with console.status("[bold blue]Connecting to Whisper service..."):
         if not client.check_connection():
             console.print(f"[red]✗ Cannot connect to Whisper service at {host}:{port}[/red]")
             sys.exit(1)
-    
-    console.print(f"[green]✓[/green] Connected to Whisper service")
+
+    console.print("[green]✓[/green] Connected to Whisper service")
     console.print()
-    
+
     success_count = 0
     fail_count = 0
-    
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -753,16 +842,23 @@ def transcribe_all(
         console=console,
     ) as progress:
         task = progress.add_task("Transcribing...", total=len(files))
-        
+
         for audio_file in files:
             progress.update(task, description=f"Transcribing {audio_file.name}...")
-            
+
             try:
-                result = client.convert_and_transcribe(audio_file)
-                
+                result = client.convert_and_transcribe(
+                    audio_file,
+                    segment_by_pauses=segment_by_pauses,
+                )
+
                 if result.success:
-                    from .transcribe import save_transcript
+                    from .transcribe import save_transcript, export_timestamped_txt, export_srt
                     save_transcript(result)
+                    if output_format == "timestamped-txt":
+                        export_timestamped_txt(result)
+                    elif output_format == "srt":
+                        export_srt(result)
                     progress.console.print(f"  [green]✓[/green] {audio_file.name}")
                     success_count += 1
                 else:
@@ -781,6 +877,233 @@ def transcribe_all(
     console.print(f"  Failed: {fail_count}")
     
     if fail_count > 0:
+        sys.exit(1)
+
+
+@cli.command('transcribe-compare')
+@click.argument('audio_file', type=click.Path(exists=True, path_type=Path))
+@click.option('--host', '-H', envvar='WHISPER_GRPC_HOST', default='localhost',
+              help='Whisper gRPC host (env: WHISPER_GRPC_HOST)')
+@click.option('--port', '-p', envvar='WHISPER_GRPC_PORT', default=50051, type=int,
+              help='Whisper gRPC port (env: WHISPER_GRPC_PORT)')
+@click.option('--language', '-l', default='en-US',
+              help='Language code (BCP-47 format)')
+@click.option('--output', '-o', type=click.Path(path_type=Path),
+              help='Output directory for comparison results')
+def transcribe_compare(
+    audio_file: Path,
+    host: str,
+    port: int,
+    language: str,
+    output: Optional[Path],
+) -> None:
+    """Compare transcription with different audio preprocessing methods.
+    
+    Transcribes the same AUDIO_FILE using three preprocessing methods:
+    - none: No preprocessing (raw audio)
+    - ffmpeg: FFmpeg filters (bandpass + noise reduction + normalization)
+    - sox: Sox noise reduction with automatic noise profiling
+    
+    Saves separate transcript files for each method to compare accuracy.
+    
+    Requires the NVIDIA Whisper ASR service to be running.
+    """
+    if not TRANSCRIPTION_AVAILABLE:
+        console.print("[red]Error: Transcription dependencies not installed[/red]")
+        console.print("[dim]Install with: pip install nvidia-riva-client[/dim]")
+        sys.exit(1)
+    
+    console.print("[bold]Preprocessing Comparison Test[/bold]")
+    console.print(f"  Audio file: {audio_file}")
+    console.print(f"  Whisper service: {host}:{port}")
+    console.print(f"  Language: {language}")
+    console.print()
+    
+    import shutil
+    if not shutil.which("sox"):
+        console.print("[yellow]Note: sox not found - sox preprocessing will be skipped[/yellow]")
+        console.print("[dim]Install sox: apt install sox[/dim]")
+        console.print()
+    
+    results = compare_preprocessing(
+        audio_path=audio_file,
+        grpc_host=host,
+        grpc_port=port,
+        language_code=language,
+        output_dir=output,
+    )
+    
+    if not results:
+        console.print("[red]Comparison failed - could not connect to Whisper service[/red]")
+        sys.exit(1)
+    
+    # Print final summary
+    console.print()
+    console.print("[bold]Results saved:[/bold]")
+    for method_name, result in results.items():
+        if result.success and result.transcript_file:
+            console.print(f"  [green]✓[/green] {result.transcript_file.name}")
+        else:
+            console.print(f"  [red]✗[/red] {method_name}: {result.error}")
+    
+    console.print()
+    console.print("[dim]Compare the transcript files to see which preprocessing works best.[/dim]")
+
+
+@cli.command("ingest-transcripts")
+@click.option('--config', '-c', type=click.Path(exists=True, path_type=Path),
+              help='Path to configuration file')
+@click.option('--recordings-dir', type=click.Path(path_type=Path),
+              help='Directory to scan for transcript JSON files')
+@click.pass_context
+def ingest_transcripts(
+    ctx: click.Context,
+    config: Optional[Path],
+    recordings_dir: Optional[Path],
+) -> None:
+    """Backfill transcript JSON files into vector + metadata stores."""
+    cfg = load_config(config) if config else ctx.obj['config']
+    if not getattr(cfg, "rag", None) or not cfg.rag.enabled:
+        console.print("[red]Error: rag.enabled is false or missing in config[/red]")
+        sys.exit(1)
+
+    try:
+        from .ingest import TranscriptIngestionService
+        service = TranscriptIngestionService(cfg)
+    except Exception as exc:
+        console.print(f"[red]Error initializing ingestion service: {exc}[/red]")
+        sys.exit(1)
+
+    target_dir = recordings_dir or cfg.output_dir
+    console.print(f"[bold]Backfilling transcripts[/bold]")
+    console.print(f"  Source: {target_dir}")
+    with console.status("[bold blue]Indexing transcripts..."):
+        stats = service.backfill(target_dir)
+
+    console.print("[green]✓ Backfill complete[/green]")
+    console.print(f"  Files processed: {stats.files_processed}")
+    console.print(f"  Docs upserted: {stats.docs_upserted}")
+    console.print(f"  Docs skipped: {stats.docs_skipped}")
+    console.print(f"  Errors: {stats.errors}")
+    if stats.errors > 0:
+        sys.exit(1)
+
+
+@cli.command("search")
+@click.argument("query")
+@click.option('--config', '-c', type=click.Path(exists=True, path_type=Path),
+              help='Path to configuration file')
+@click.option('--start-time', help='Filter start time (ISO-8601 UTC)')
+@click.option('--end-time', help='Filter end time (ISO-8601 UTC)')
+@click.option('--feed-id', 'feed_ids', multiple=True, help='Include only these feed IDs')
+@click.option('--exclude-feed-id', 'exclude_feed_ids', multiple=True, help='Exclude feed IDs')
+@click.option('--top-k', default=10, type=int, help='Max number of results')
+@click.pass_context
+def search_cmd(
+    ctx: click.Context,
+    query: str,
+    config: Optional[Path],
+    start_time: Optional[str],
+    end_time: Optional[str],
+    feed_ids: tuple[str, ...],
+    exclude_feed_ids: tuple[str, ...],
+    top_k: int,
+) -> None:
+    """Semantic transcript search with optional time/channel filters."""
+    cfg = load_config(config) if config else ctx.obj['config']
+    if not getattr(cfg, "rag", None) or not cfg.rag.enabled:
+        console.print("[red]Error: rag.enabled is false or missing in config[/red]")
+        sys.exit(1)
+
+    try:
+        from .ingest import TranscriptIngestionService
+        from .rag_models import SearchFilters
+        service = TranscriptIngestionService(cfg)
+        filters = SearchFilters(
+            start_time_utc=datetime.fromisoformat(start_time.replace("Z", "+00:00")).astimezone(timezone.utc)
+            if start_time else None,
+            end_time_utc=datetime.fromisoformat(end_time.replace("Z", "+00:00")).astimezone(timezone.utc)
+            if end_time else None,
+            feed_ids=list(feed_ids) if feed_ids else None,
+            exclude_feed_ids=list(exclude_feed_ids) if exclude_feed_ids else None,
+        )
+        hits = service.search(query=query, filters=filters, top_k=top_k)
+    except Exception as exc:
+        console.print(f"[red]Search failed: {exc}[/red]")
+        sys.exit(1)
+
+    if not hits:
+        console.print("[yellow]No results.[/yellow]")
+        return
+
+    table = Table(title=f"Search Results ({len(hits)})")
+    table.add_column("Score", style="green")
+    table.add_column("Feed", style="cyan")
+    table.add_column("Start", style="yellow")
+    table.add_column("Text", style="white")
+    for hit in hits:
+        snippet = (hit.text[:120] + "...") if len(hit.text) > 120 else hit.text
+        table.add_row(
+            f"{hit.score:.4f}",
+            hit.feed_id,
+            hit.start_time_utc.isoformat(),
+            snippet,
+        )
+    console.print(table)
+
+
+@cli.command("rag-check")
+@click.option('--config', '-c', type=click.Path(exists=True, path_type=Path),
+              help='Path to configuration file')
+@click.pass_context
+def rag_check(ctx: click.Context, config: Optional[Path]) -> None:
+    """Check embedding and vector store connectivity."""
+    cfg = load_config(config) if config else ctx.obj['config']
+    if not getattr(cfg, "rag", None) or not cfg.rag.enabled:
+        console.print("[red]Error: rag.enabled is false or missing in config[/red]")
+        sys.exit(1)
+
+    try:
+        from .embedding import create_embedding_client
+        from .vector_store import create_vector_store
+        embedding = create_embedding_client(cfg.rag.embedding)
+        vector_store = create_vector_store(cfg.rag.vector_store)
+    except Exception as exc:
+        console.print(f"[red]RAG init failed: {exc}[/red]")
+        sys.exit(1)
+
+    ok = True
+    if embedding.check_health():
+        console.print("[green]✓[/green] Embedding endpoint reachable")
+    else:
+        ok = False
+        console.print("[red]✗[/red] Embedding endpoint unavailable")
+
+    if vector_store.check_health():
+        console.print("[green]✓[/green] Vector store reachable")
+    else:
+        ok = False
+        console.print("[red]✗[/red] Vector store unavailable")
+
+    if not ok:
+        sys.exit(1)
+
+
+@cli.command("rag-api")
+@click.option('--config', '-c', type=click.Path(exists=True, path_type=Path),
+              help='Path to configuration file')
+@click.pass_context
+def rag_api(ctx: click.Context, config: Optional[Path]) -> None:
+    """Run HTTP search API server."""
+    cfg = load_config(config) if config else ctx.obj['config']
+    if not getattr(cfg, "rag", None) or not cfg.rag.enabled:
+        console.print("[red]Error: rag.enabled is false or missing in config[/red]")
+        sys.exit(1)
+    try:
+        from .search_api import SearchApiServer
+        SearchApiServer(cfg).run()
+    except Exception as exc:
+        console.print(f"[red]Failed to start API server: {exc}[/red]")
         sys.exit(1)
 
 

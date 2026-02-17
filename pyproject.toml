@@ -29,6 +29,7 @@ dependencies = [
     "click>=8.1.0",
     "pyyaml>=6.0",
     "rich>=13.0.0",
+    "pymilvus>=2.5.0",
 ]
 
 [project.optional-dependencies]
