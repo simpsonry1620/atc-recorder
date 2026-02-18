@@ -34,6 +34,11 @@ recording:
   # Segment duration for live recording (should match top-level segment_duration)
   segment_duration: 1800
 
+# Optional: web dashboard settings
+# dashboard:
+#   host: 0.0.0.0
+#   port: 8050
+
 # Optional: transcription defaults (for transcribe-watch and CLI)
 # transcription:
 #   segment_by_pauses: true    # segment by silence and timestamp each segment
@@ -48,32 +53,29 @@ recording:
 #   stitch_max_gap_seconds: 2.0
 #   stitch_min_text_overlap_chars: 12
 
-# Optional: RAG ingestion and semantic search configuration
-# rag:
-#   enabled: true
-#   ingest_on_transcribe: true
-#   embedding:
-#     provider: nvidia-nim
-#     # Use this when running in Docker Compose (service-to-service networking)
-#     endpoint: http://embedding-nim:8000/v1/embeddings
-#     # Use this when running CLI directly on the host machine
-#     # endpoint: http://localhost:9080/v1/embeddings
-#     model: nvidia/llama-3_2-nv-embedqa-1b-v2
-#     api_key_env: NIM_RETRIEVER_API_KEY
-#     timeout_seconds: 15
-#     max_retries: 3
-#     retry_backoff_seconds: 1.0
-#   vector_store:
-#     provider: milvus
-#     host: milvus-standalone
-#     port: 19530
-#     collection_name: atc_transcripts
-#     embedding_dim: 2048
-#     metric_type: COSINE
-#     index_type: HNSW
-#     sqlite_metadata_path: ./recordings/rag_metadata.db
-#   api:
-#     host: 0.0.0.0
-#     port: 8100
-#     top_k_default: 10
-#     top_k_max: 50
+# RAG ingestion and semantic search configuration
+rag:
+  enabled: true
+  ingest_on_transcribe: true
+  embedding:
+    provider: nvidia-nim
+    endpoint: http://embedding-nim:8000/v1/embeddings
+    model: nvidia/llama-3.2-nv-embedqa-1b-v2
+    api_key_env: NGC_API_KEY
+    timeout_seconds: 15
+    max_retries: 3
+    retry_backoff_seconds: 1.0
+  vector_store:
+    provider: milvus
+    host: milvus-standalone
+    port: 19530
+    collection_name: atc_transcripts
+    embedding_dim: 2048
+    metric_type: COSINE
+    index_type: HNSW
+    sqlite_metadata_path: ./recordings/rag_metadata.db
+  api:
+    host: 0.0.0.0
+    port: 8100
+    top_k_default: 10
+    top_k_max: 50

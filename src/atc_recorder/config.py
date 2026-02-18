@@ -40,8 +40,8 @@ class EmbeddingConfig:
 
     provider: str = "nvidia-nim"
     endpoint: str = "http://localhost:9080/v1/embeddings"
-    model: str = "nvidia/llama-3_2-nv-embedqa-1b-v2"
-    api_key_env: str = "NIM_RETRIEVER_API_KEY"
+    model: str = "nvidia/llama-3.2-nv-embedqa-1b-v2"
+    api_key_env: str = "NGC_API_KEY"
     timeout_seconds: float = 15.0
     max_retries: int = 3
     retry_backoff_seconds: float = 1.0
@@ -163,8 +163,8 @@ class Config:
                 embedding=EmbeddingConfig(
                     provider=emb_data.get("provider", "nvidia-nim"),
                     endpoint=emb_data.get("endpoint", "http://localhost:9080/v1/embeddings"),
-                    model=emb_data.get("model", "nvidia/llama-3_2-nv-embedqa-1b-v2"),
-                    api_key_env=emb_data.get("api_key_env", "NIM_RETRIEVER_API_KEY"),
+                    model=emb_data.get("model", "nvidia/llama-3.2-nv-embedqa-1b-v2"),
+                    api_key_env=emb_data.get("api_key_env", "NGC_API_KEY"),
                     timeout_seconds=emb_data.get("timeout_seconds", 15.0),
                     max_retries=emb_data.get("max_retries", 3),
                     retry_backoff_seconds=emb_data.get("retry_backoff_seconds", 1.0),

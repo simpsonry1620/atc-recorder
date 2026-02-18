@@ -336,8 +336,8 @@ rag:
     endpoint: http://embedding-nim:8000/v1/embeddings
     # Host CLI runtime alternative:
     # endpoint: http://localhost:9080/v1/embeddings
-    model: nvidia/llama-3_2-nv-embedqa-1b-v2
-    api_key_env: NIM_RETRIEVER_API_KEY
+    model: nvidia/llama-3.2-nv-embedqa-1b-v2
+    api_key_env: NGC_API_KEY
   vector_store:
     provider: milvus
     host: milvus-standalone
@@ -382,7 +382,7 @@ docker compose run --rm atc-recorder search "departure congestion" --feed-id kdc
 ```
 
 Quick checks when startup fails:
-- Retriever unhealthy: verify `NIM_RETRIEVER_API_KEY` is set and `embedding-nim` logs show model startup completed.
+- Retriever unhealthy: verify `NGC_API_KEY` is set and `embedding-nim` logs show model startup completed.
 - Wrong endpoint: inside Docker use `http://embedding-nim:8000/v1/embeddings`; host CLI use `http://localhost:9080/v1/embeddings`.
 - Auth mismatch: confirm `rag.embedding.api_key_env` matches the env var exported in the running process/container.
 - Vector mismatch after model change: set `rag.vector_store.embedding_dim` to the Retriever model output dimension before ingesting.
@@ -418,8 +418,7 @@ cp .env.example .env
 Available environment variables:
 - `TZ`: Timezone (default: UTC)
 - `ATC_LOG_LEVEL`: Logging level - DEBUG, INFO, WARNING, ERROR (default: INFO)
-- `NGC_API_KEY`: NVIDIA NGC API key (required for ASR features)
-- `NIM_RETRIEVER_API_KEY`: API key for local NIM Retriever embeddings
+- `NGC_API_KEY`: NVIDIA NGC API key (used for both Whisper ASR and local NIM Retriever)
 - `NIM_RETRIEVER_IMAGE`: Retriever container image tag (default in `.env.example`)
 - `NIM_RETRIEVER_HTTP_PORT`: Internal Retriever HTTP port (default: `8000`)
 - `NIM_RETRIEVER_HOST_PORT`: Host port mapped to Retriever HTTP port (default: `9080`)

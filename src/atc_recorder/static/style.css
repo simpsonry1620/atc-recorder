@@ -1,0 +1,183 @@
+/* ATC Recorder Dashboard – plain CSS (no @apply; Tailwind CDN handles utility classes in HTML) */
+
+/* Tab buttons */
+.tab-btn {
+  padding: 0.5rem 1rem;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: #9ca3af;
+  border-radius: 0.5rem 0.5rem 0 0;
+  border: 1px solid transparent;
+  transition: color 0.15s;
+  background: transparent;
+  cursor: pointer;
+}
+.tab-btn:hover {
+  color: #e5e7eb;
+}
+.tab-btn.active {
+  color: #fff;
+  background: #030712; /* gray-950 */
+  border-color: #1f2937;
+  border-bottom-color: #030712;
+}
+
+/* Cards */
+.card {
+  background: #111827; /* gray-900 */
+  border: 1px solid #1f2937;
+  border-radius: 0.75rem;
+  padding: 1.25rem;
+}
+.card-title {
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #9ca3af;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Stat cards */
+.stat-card {
+  background: #111827;
+  border: 1px solid #1f2937;
+  border-radius: 0.75rem;
+  padding: 1.25rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+.stat-value {
+  font-size: 1.875rem;
+  font-weight: 700;
+  color: #fff;
+  font-variant-numeric: tabular-nums;
+}
+.stat-label {
+  font-size: 0.75rem;
+  color: #6b7280;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+/* Form elements */
+.label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 500;
+  color: #9ca3af;
+  margin-bottom: 0.25rem;
+}
+.input {
+  background: #1f2937;
+  border: 1px solid #374151;
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.75rem;
+  font-size: 0.875rem;
+  color: #e5e7eb;
+  outline: none;
+}
+.input:focus {
+  box-shadow: 0 0 0 2px #0d84ff;
+  border-color: transparent;
+}
+.btn-primary {
+  padding: 0.5rem 1.25rem;
+  background: #0d84ff;
+  color: #fff;
+  font-size: 0.875rem;
+  font-weight: 500;
+  border-radius: 0.5rem;
+  border: none;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+.btn-primary:hover {
+  background: #28a3ff;
+}
+.btn-primary:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px #51c2ff;
+}
+
+/* Segment rows in transcript browser */
+.seg-row {
+  display: flex;
+  gap: 0.75rem;
+  align-items: flex-start;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  transition: background 0.15s;
+  font-size: 0.875rem;
+  border: 1px solid transparent;
+}
+.seg-row:hover {
+  background: rgba(31, 41, 55, 0.6);
+}
+.seg-row.playing {
+  background: rgba(15, 48, 90, 0.4);
+  border-color: #0859be;
+}
+.seg-time {
+  flex-shrink: 0;
+  width: 7rem;
+  font-family: ui-monospace, monospace;
+  font-size: 0.75rem;
+  color: #6b7280;
+  padding-top: 0.125rem;
+}
+.seg-role {
+  flex-shrink: 0;
+  width: 4rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  padding-top: 0.125rem;
+}
+.seg-role.atc     { color: #60a5fa; }
+.seg-role.pilot   { color: #34d399; }
+.seg-role.unknown { color: #6b7280; }
+.seg-text {
+  flex: 1;
+  color: #d1d5db;
+}
+
+/* Search result card */
+.hit-card {
+  background: #111827;
+  border: 1px solid #1f2937;
+  border-radius: 0.75rem;
+  padding: 1.25rem;
+  cursor: pointer;
+  transition: border-color 0.15s;
+}
+.hit-card:hover {
+  border-color: #4b5563;
+}
+.hit-score {
+  display: inline-block;
+  padding: 0.125rem 0.5rem;
+  background: rgba(15, 48, 90, 0.5);
+  color: #89d9ff;
+  font-size: 0.75rem;
+  font-family: ui-monospace, monospace;
+  border-radius: 0.25rem;
+}
+
+/* Service health dot */
+.health-dot {
+  display: inline-block;
+  width: 0.625rem;
+  height: 0.625rem;
+  border-radius: 50%;
+}
+.health-dot.up    { background: #10b981; }
+.health-dot.down  { background: #ef4444; }
+.health-dot.na    { background: #4b5563; }
+
+/* Audio player dark theme tweak */
+audio {
+  filter: invert(1) hue-rotate(180deg);
+  border-radius: 8px;
+}

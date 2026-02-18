@@ -25,8 +25,13 @@ class EmbeddingClient(ABC):
     """Provider-agnostic embedding client."""
 
     @abstractmethod
-    def embed_text(self, text: str) -> EmbeddingResult:
-        """Embed one text value."""
+    def embed_text(self, text: str, input_type: str = "passage") -> EmbeddingResult:
+        """Embed one text value.
+
+        Args:
+            text: The text to embed.
+            input_type: 'passage' for indexing, 'query' for search queries.
+        """
 
     @abstractmethod
     def check_health(self) -> bool:
@@ -46,11 +51,15 @@ class NvidiaNIMEmbeddingClient(EmbeddingClient):
             headers["Authorization"] = f"Bearer {api_key}"
         return headers
 
-    def embed_text(self, text: str) -> EmbeddingResult:
+    def embed_text(self, text: str, input_type: str = "passage") -> EmbeddingResult:
         if not text.strip():
             raise ValueError("Cannot embed empty text")
 
-        payload = {"model": self.config.model, "input": text}
+        payload = {
+            "model": self.config.model,
+            "input": [text],
+            "input_type": input_type,
+        }
         last_error = None
         for attempt in range(1, self.config.max_retries + 1):
             try:
@@ -74,7 +83,7 @@ class NvidiaNIMEmbeddingClient(EmbeddingClient):
 
     def check_health(self) -> bool:
         try:
-            self.embed_text("radio check")
+            self.embed_text("radio check", input_type="query")
             return True
         except Exception as exc:
             logger.debug("Embedding health check failed: %s", exc)

@@ -26,8 +26,8 @@ COPY --chown=atc:atc pyproject.toml README.md ./
 COPY --chown=atc:atc src/ ./src/
 COPY --chown=atc:atc config.yaml ./
 
-# Install the package (not editable for Docker)
-RUN pip install --no-cache-dir .
+# Install the package with dashboard visualization extras
+RUN pip install --no-cache-dir ".[dashboard-viz]"
 
 # Create directories with proper permissions
 RUN mkdir -p /app/recordings /app/logs \

@@ -20,7 +20,7 @@ x-common: &common
   environment:
     - TZ=${TZ:-UTC}
     - ATC_LOG_LEVEL=${ATC_LOG_LEVEL:-INFO}
-    - NIM_RETRIEVER_API_KEY=${NIM_RETRIEVER_API_KEY:-}
+    - NGC_API_KEY=${NGC_API_KEY:-}
   networks:
     - atc-network
 
@@ -103,6 +103,20 @@ services:
         max-size: "5m"
         max-file: "3"
 
+  # Web dashboard for visualizing recordings, transcripts, and search
+  atc-dashboard:
+    <<: *common
+    container_name: atc-dashboard
+    command: ["dashboard", "--config", "/app/config.yaml", "--port", "8050"]
+    ports:
+      - "8050:8050"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8050/api/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
   # NVIDIA Whisper ASR service - use with --profile asr
   # Requires: NVIDIA GPU, Container Toolkit, and NGC_API_KEY
   # First run may take up to 30 minutes for model download
@@ -180,7 +194,7 @@ services:
           memory: 128M
 
   # NVIDIA NIM Retriever embedding service - use with --profile rag
-  # Requires: NVIDIA GPU, Container Toolkit, and NIM_RETRIEVER_API_KEY
+  # Requires: NVIDIA GPU, Container Toolkit, and NGC_API_KEY
   embedding-nim:
     image: ${NIM_RETRIEVER_IMAGE:-nvcr.io/nim/nvidia/llama-3.2-nv-embedqa-1b-v2:latest}
     container_name: atc-embedding-nim
@@ -197,7 +211,7 @@ services:
               capabilities: [gpu]
     shm_size: 8gb
     environment:
-      - NGC_API_KEY=${NIM_RETRIEVER_API_KEY}
+      - NGC_API_KEY=${NGC_API_KEY}
       - NIM_HTTP_API_PORT=${NIM_RETRIEVER_HTTP_PORT:-8000}
       - NIM_TAGS_SELECTOR=${NIM_RETRIEVER_TAGS_SELECTOR:-name=llama-3.2-nv-embedqa-1b-v2}
     ports:

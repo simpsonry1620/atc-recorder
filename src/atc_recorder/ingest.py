@@ -315,7 +315,7 @@ class TranscriptIngestionService:
 
     def search(self, query: str, filters: SearchFilters, top_k: int) -> list[SearchHit]:
         t0 = time.perf_counter()
-        vector = self.embedding_client.embed_text(query).vector
+        vector = self.embedding_client.embed_text(query, input_type="query").vector
         hits = self.vector_store.search(vector, filters=filters, top_k=top_k)
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
         logger.info("search query_len=%s top_k=%s hits=%s elapsed_ms=%s", len(query), top_k, len(hits), elapsed_ms)

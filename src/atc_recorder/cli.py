@@ -1177,5 +1177,28 @@ def rag_api(ctx: click.Context, config: Optional[Path]) -> None:
         sys.exit(1)
 
 
+@cli.command("dashboard")
+@click.option('--config', '-c', type=click.Path(exists=True, path_type=Path),
+              help='Path to configuration file')
+@click.option('--host', '-H', default='0.0.0.0', help='Dashboard bind address')
+@click.option('--port', '-p', default=8050, type=int, help='Dashboard port')
+@click.pass_context
+def dashboard(ctx: click.Context, config: Optional[Path], host: str, port: int) -> None:
+    """Run the web dashboard for visualizing recordings and transcripts."""
+    cfg = load_config(config) if config else ctx.obj['config']
+    console.print(f"[bold]ATC Recorder Dashboard[/bold]")
+    console.print(f"  URL: http://{host}:{port}")
+    console.print(f"  Recordings: {cfg.output_dir}")
+    console.print()
+    try:
+        from .dashboard import run_dashboard
+        run_dashboard(cfg, host=host, port=port)
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Dashboard stopped[/yellow]")
+    except Exception as exc:
+        console.print(f"[red]Failed to start dashboard: {exc}[/red]")
+        sys.exit(1)
+
+
 if __name__ == '__main__':
     cli()

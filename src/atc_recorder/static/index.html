@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="en" class="h-full bg-gray-950">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ATC Recorder Dashboard</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+  <link rel="stylesheet" href="/static/style.css" />
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            brand: { 50:'#eef9ff', 100:'#d8f1ff', 200:'#b9e7ff', 300:'#89d9ff',
+                     400:'#51c2ff', 500:'#28a3ff', 600:'#0d84ff', 700:'#006deb',
+                     800:'#0859be', 900:'#104d95', 950:'#0f305a' },
+          }
+        }
+      }
+    }
+  </script>
+</head>
+<body class="h-full text-gray-200 antialiased">
+  <div id="app" class="flex flex-col h-full">
+
+    <!-- Top bar -->
+    <header class="flex items-center justify-between px-6 py-3 bg-gray-900 border-b border-gray-800 shrink-0">
+      <div class="flex items-center gap-3">
+        <svg class="w-7 h-7 text-brand-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M9.348 14.652a3.75 3.75 0 0 1 0-5.304m5.304 0a3.75 3.75 0 0 1 0 5.304m-7.425 2.121a6.75 6.75 0 0 1 0-9.546m9.546 0a6.75 6.75 0 0 1 0 9.546M5.106 18.894c-3.808-3.807-3.808-9.98 0-13.788m13.788 0c3.808 3.807 3.808 9.98 0 13.788M12 12h.008v.008H12V12Z" />
+        </svg>
+        <h1 class="text-lg font-semibold text-white tracking-tight">ATC Recorder</h1>
+      </div>
+      <div id="service-dots" class="flex items-center gap-4 text-xs"></div>
+    </header>
+
+    <!-- Tab bar -->
+    <nav class="flex gap-1 px-6 pt-2 bg-gray-900 shrink-0" id="tab-bar">
+      <button class="tab-btn active" data-tab="overview">Overview</button>
+      <button class="tab-btn" data-tab="browser">Transcripts</button>
+      <button class="tab-btn" data-tab="search">Search</button>
+      <button class="tab-btn" data-tab="embeddings">Embeddings</button>
+    </nav>
+
+    <!-- Tab panels -->
+    <main class="flex-1 overflow-y-auto">
+
+      <!-- ═══════════ OVERVIEW ═══════════ -->
+      <section id="panel-overview" class="tab-panel p-6 space-y-6">
+        <div id="stats-cards" class="grid grid-cols-2 md:grid-cols-4 gap-4"></div>
+        <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          <div class="card">
+            <h3 class="card-title">Service Health</h3>
+            <div id="service-health" class="space-y-2 mt-3"></div>
+          </div>
+          <div class="card">
+            <h3 class="card-title">Recent Transcriptions</h3>
+            <div id="recent-list" class="mt-3 space-y-1 max-h-80 overflow-y-auto text-sm"></div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══════════ TRANSCRIPT BROWSER ═══════════ -->
+      <section id="panel-browser" class="tab-panel hidden p-6">
+        <div class="flex flex-wrap gap-4 items-end mb-6">
+          <div>
+            <label class="label">Feed</label>
+            <select id="br-feed" class="input w-52"></select>
+          </div>
+          <div>
+            <label class="label">Date</label>
+            <select id="br-date" class="input w-44"></select>
+          </div>
+          <div>
+            <label class="label">Recording</label>
+            <select id="br-file" class="input w-64"></select>
+          </div>
+          <button id="br-load" class="btn-primary h-10">Load</button>
+        </div>
+
+        <div id="br-player" class="hidden mb-4">
+          <audio id="br-audio" controls class="w-full rounded-lg"></audio>
+        </div>
+
+        <div id="br-timeline" class="space-y-1"></div>
+      </section>
+
+      <!-- ═══════════ SEMANTIC SEARCH ═══════════ -->
+      <section id="panel-search" class="tab-panel hidden p-6">
+        <div id="se-rag-banner" class="hidden mb-6 rounded-xl border border-yellow-800/50 bg-yellow-950/30 px-5 py-4">
+          <p class="text-yellow-300 text-sm font-medium mb-1">RAG services not enabled</p>
+          <p class="text-yellow-200/60 text-xs">Semantic search requires the RAG profile (Embedding NIM + Milvus). Enable the <code class="text-yellow-300/80">rag</code> section in <code class="text-yellow-300/80">config.yaml</code> and start with: <code class="text-yellow-300/80">docker compose --profile rag up -d</code></p>
+        </div>
+        <div class="flex flex-wrap gap-3 items-end mb-6">
+          <div class="flex-1 min-w-[300px]">
+            <label class="label">Query</label>
+            <input id="se-query" type="text" class="input w-full" placeholder="e.g. runway incursion, go-around, climb to flight level..." />
+          </div>
+          <div>
+            <label class="label">Feed filter</label>
+            <input id="se-feed" type="text" class="input w-40" placeholder="all feeds" />
+          </div>
+          <div>
+            <label class="label">Top K</label>
+            <input id="se-topk" type="number" class="input w-20" value="10" min="1" max="50" />
+          </div>
+          <button id="se-go" class="btn-primary h-10">Search</button>
+        </div>
+        <div id="se-results" class="space-y-3"></div>
+        <div id="se-empty" class="text-gray-500 text-center py-12 hidden">Enter a query and press Search</div>
+      </section>
+
+      <!-- ═══════════ EMBEDDING EXPLORER ═══════════ -->
+      <section id="panel-embeddings" class="tab-panel hidden p-6">
+        <div id="em-rag-banner" class="hidden mb-4 rounded-xl border border-yellow-800/50 bg-yellow-950/30 px-5 py-4">
+          <p class="text-yellow-300 text-sm font-medium mb-1">RAG services not enabled</p>
+          <p class="text-yellow-200/60 text-xs">Embedding visualization requires the RAG profile (Embedding NIM). Enable the <code class="text-yellow-300/80">rag</code> section in <code class="text-yellow-300/80">config.yaml</code> and start with: <code class="text-yellow-300/80">docker compose --profile rag up -d</code></p>
+        </div>
+        <div class="flex flex-wrap gap-3 items-end mb-4">
+          <div>
+            <label class="label">Feed</label>
+            <select id="em-feed" class="input w-52"></select>
+          </div>
+          <div>
+            <label class="label">Date</label>
+            <select id="em-date" class="input w-44"></select>
+          </div>
+          <div>
+            <label class="label">Color by</label>
+            <select id="em-color" class="input w-36">
+              <option value="feed">Feed</option>
+              <option value="role">Speaker role</option>
+              <option value="time">Time</option>
+            </select>
+          </div>
+          <div>
+            <label class="label">Dimensions</label>
+            <select id="em-dims" class="input w-24">
+              <option value="2">2D</option>
+              <option value="3">3D</option>
+            </select>
+          </div>
+          <button id="em-load" class="btn-primary h-10">Load Embeddings</button>
+        </div>
+        <div id="em-plot" class="w-full rounded-xl overflow-hidden" style="height:560px;"></div>
+        <div id="em-empty" class="text-gray-500 text-center py-12">Select a feed/date and load embeddings</div>
+      </section>
+
+    </main>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
