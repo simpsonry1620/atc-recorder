@@ -53,6 +53,7 @@ transcription:
   stitch_across_files: false  # stitch transmissions spanning adjacent files
   stitch_max_gap_seconds: 2.0
   stitch_min_text_overlap_chars: 12
+  variant_store_path: ./recordings/transcripts.db
 
 # RAG ingestion and semantic search configuration
 rag:

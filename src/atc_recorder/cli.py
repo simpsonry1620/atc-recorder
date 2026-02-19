@@ -77,6 +77,29 @@ def _build_transcript_ingest_callback(cfg: Config):
     return _callback
 
 
+def _build_variant_store(cfg: Config):
+    """Create a TranscriptVariantStore from the config, or None on failure."""
+    trans = getattr(cfg, "transcription", None)
+    db_path = Path(trans.variant_store_path) if trans else Path("./recordings/transcripts.db")
+    try:
+        from .variant_store import TranscriptVariantStore
+        return TranscriptVariantStore(db_path=db_path, recordings_root=cfg.output_dir)
+    except Exception as exc:
+        console.print(f"[yellow]Variant store unavailable: {exc}[/yellow]")
+        return None
+
+
+def _get_asr_model_name(host: str, port: int) -> str:
+    """Infer ASR model name from the gRPC endpoint environment/defaults."""
+    import os
+    grpc_host = os.environ.get("WHISPER_GRPC_HOST", host)
+    if "parakeet" in grpc_host.lower():
+        return "parakeet-tdt-0.6b-v2"
+    if port == 50052:
+        return "parakeet-tdt-0.6b-v2"
+    return "whisper-large-v3"
+
+
 @click.group()
 @click.version_option(version=__version__)
 @click.option('--config', '-c', type=click.Path(exists=True, path_type=Path),
@@ -771,6 +794,8 @@ def transcribe_watch(
 
     try:
         ingest_callback = _build_transcript_ingest_callback(cfg)
+        vs = _build_variant_store(cfg)
+        model_name = _get_asr_model_name(host, port)
         watch_and_transcribe(
             watch_dir=watch_dir,
             grpc_host=host,
@@ -789,6 +814,8 @@ def transcribe_watch(
             stitch_across_files=stitch_across_files,
             stitch_max_gap_seconds=stitch_max_gap_seconds,
             stitch_min_text_overlap_chars=stitch_min_text_overlap_chars,
+            asr_model=model_name,
+            variant_store=vs,
         )
     except KeyboardInterrupt:
         pass
@@ -892,6 +919,9 @@ def transcribe_all(
     console.print(f"  Output format: {output_format}")
     console.print()
 
+    vs_batch = _build_variant_store(cfg)
+    model_name_batch = _get_asr_model_name(host, port)
+
     # Check connection first
     client = WhisperClient(grpc_host=host, grpc_port=port, language_code=language)
     with console.status("[bold blue]Connecting to Whisper service..."):
@@ -934,7 +964,13 @@ def transcribe_all(
                         stitch_transcript_boundary_with_previous,
                         refresh_result_from_saved_transcript,
                     )
-                    save_transcript(result)
+                    save_transcript(
+                        result,
+                        asr_model=model_name_batch,
+                        preprocess=preprocess_mode.value,
+                        variant_store=vs_batch,
+                        recordings_root=recordings_dir,
+                    )
                     if result.transcript_file and stitch_enabled:
                         stitched = stitch_transcript_boundary_with_previous(
                             result.transcript_file,
@@ -978,7 +1014,9 @@ def transcribe_all(
               help='Language code (BCP-47 format)')
 @click.option('--output', '-o', type=click.Path(path_type=Path),
               help='Output directory for comparison results')
+@click.pass_context
 def transcribe_compare(
+    ctx: click.Context,
     audio_file: Path,
     host: str,
     port: int,
@@ -1001,6 +1039,10 @@ def transcribe_compare(
         console.print("[dim]Install with: pip install nvidia-riva-client[/dim]")
         sys.exit(1)
     
+    cfg = ctx.obj['config']
+    vs = _build_variant_store(cfg)
+    model_name = _get_asr_model_name(host, port)
+
     console.print("[bold]Preprocessing Comparison Test[/bold]")
     console.print(f"  Audio file: {audio_file}")
     console.print(f"  Whisper service: {host}:{port}")
@@ -1019,6 +1061,9 @@ def transcribe_compare(
         grpc_port=port,
         language_code=language,
         output_dir=output,
+        asr_model=model_name,
+        variant_store=vs,
+        recordings_root=cfg.output_dir,
     )
     
     if not results:
@@ -1657,6 +1702,345 @@ def position_profile_cmd(
         console.print(f"[dim]Callsigns seen: {', '.join(profile.callsign_list[:30])}"
                        + (f" ... and {len(profile.callsign_list) - 30} more" if len(profile.callsign_list) > 30 else "")
                        + "[/dim]")
+
+
+@cli.group()
+def variants() -> None:
+    """Manage transcript variants (multiple ASR outputs and edits)."""
+    pass
+
+
+@variants.command("list")
+@click.option("--audio-file", help="Filter by audio filename (e.g. kdca1_twr_2026-02-19_0003Z.mp3)")
+@click.option("--feed", help="Filter by feed ID (e.g. kdca1_twr)")
+@click.option("--model", help="Filter by ASR model name")
+@click.option("--limit", default=100, type=int, help="Max results to show")
+@click.pass_context
+def variants_list(
+    ctx: click.Context,
+    audio_file: Optional[str],
+    feed: Optional[str],
+    model: Optional[str],
+    limit: int,
+) -> None:
+    """List transcript variants with optional filters."""
+    cfg = ctx.obj["config"]
+    vs = _build_variant_store(cfg)
+    if vs is None:
+        console.print("[red]Error: variant store not available[/red]")
+        sys.exit(1)
+
+    from .variant_store import TranscriptVariantStore
+    items = vs.list_variants(audio_file=audio_file, feed_id=feed, asr_model=model, limit=limit)
+
+    if not items:
+        console.print("[yellow]No variants found.[/yellow]")
+        return
+
+    table = Table(title=f"Transcript Variants ({len(items)} results)")
+    table.add_column("ID", style="dim", max_width=10)
+    table.add_column("Audio File", style="cyan")
+    table.add_column("Model", style="green")
+    table.add_column("Preprocess", style="yellow")
+    table.add_column("Type", style="dim")
+    table.add_column("Words", justify="right")
+    table.add_column("Segs", justify="right")
+    table.add_column("Active", justify="center")
+    table.add_column("Created", style="dim")
+
+    for v in items:
+        created_short = v.created_at[:19] if v.created_at else ""
+        table.add_row(
+            v.variant_id[:10],
+            v.audio_file,
+            v.asr_model,
+            v.preprocess,
+            v.variant_type,
+            str(v.word_count),
+            str(v.segment_count),
+            "[green]yes[/green]" if v.is_active else "no",
+            created_short,
+        )
+
+    console.print(table)
+
+
+@variants.command("show")
+@click.argument("variant_id")
+@click.option("--full", is_flag=True, help="Show full transcript JSON")
+@click.pass_context
+def variants_show(ctx: click.Context, variant_id: str, full: bool) -> None:
+    """Display a variant's transcript."""
+    cfg = ctx.obj["config"]
+    vs = _build_variant_store(cfg)
+    if vs is None:
+        console.print("[red]Error: variant store not available[/red]")
+        sys.exit(1)
+
+    variant = vs.get_variant(variant_id)
+    if variant is None:
+        # Try prefix match
+        matches = [v for v in vs.list_variants(limit=500) if v.variant_id.startswith(variant_id)]
+        if len(matches) == 1:
+            variant = matches[0]
+        elif len(matches) > 1:
+            console.print(f"[yellow]Ambiguous ID prefix '{variant_id}'. Matches:[/yellow]")
+            for m in matches:
+                console.print(f"  {m.variant_id[:10]}  {m.audio_file}  {m.asr_model}/{m.preprocess}")
+            return
+        else:
+            console.print(f"[red]Variant not found: {variant_id}[/red]")
+            return
+
+    console.print(f"[bold]Variant: {variant.variant_id}[/bold]")
+    console.print(f"  Audio file:  {variant.audio_file}")
+    console.print(f"  Feed:        {variant.feed_id}")
+    console.print(f"  ASR model:   {variant.asr_model}")
+    console.print(f"  Preprocess:  {variant.preprocess}")
+    console.print(f"  Type:        {variant.variant_type}")
+    console.print(f"  Active:      {'yes' if variant.is_active else 'no'}")
+    console.print(f"  Words:       {variant.word_count}")
+    console.print(f"  Segments:    {variant.segment_count}")
+    console.print(f"  Created:     {variant.created_at}")
+    console.print(f"  Created by:  {variant.created_by}")
+    if variant.parent_variant_id:
+        console.print(f"  Parent:      {variant.parent_variant_id}")
+    if variant.notes:
+        console.print(f"  Notes:       {variant.notes}")
+    console.print()
+
+    if full:
+        import json
+        console.print_json(json.dumps(variant.transcript, indent=2, ensure_ascii=False))
+    else:
+        text = variant.transcript.get("text", "")
+        console.print("[bold]Transcript text:[/bold]")
+        console.print(text if text else "[dim](empty)[/dim]")
+
+
+@variants.command("compare")
+@click.argument("variant_a")
+@click.argument("variant_b")
+@click.pass_context
+def variants_compare(ctx: click.Context, variant_a: str, variant_b: str) -> None:
+    """Compare two transcript variants side by side.
+
+    VARIANT_A and VARIANT_B are variant IDs (or unique prefixes).
+    """
+    cfg = ctx.obj["config"]
+    vs = _build_variant_store(cfg)
+    if vs is None:
+        console.print("[red]Error: variant store not available[/red]")
+        sys.exit(1)
+
+    def _resolve(vid: str):
+        v = vs.get_variant(vid)
+        if v:
+            return v.variant_id
+        matches = [x for x in vs.list_variants(limit=500) if x.variant_id.startswith(vid)]
+        if len(matches) == 1:
+            return matches[0].variant_id
+        return None
+
+    id_a = _resolve(variant_a)
+    id_b = _resolve(variant_b)
+    if not id_a:
+        console.print(f"[red]Cannot resolve variant: {variant_a}[/red]")
+        return
+    if not id_b:
+        console.print(f"[red]Cannot resolve variant: {variant_b}[/red]")
+        return
+
+    diff = vs.compare_variants(id_a, id_b)
+    if diff is None:
+        console.print("[red]Error computing diff.[/red]")
+        return
+
+    va = vs.get_variant(id_a)
+    vb = vs.get_variant(id_b)
+
+    console.print("[bold]Variant Comparison[/bold]")
+    console.print(f"  A: {id_a[:10]}  ({va.asr_model}/{va.preprocess})  {diff.word_count_a} words, {diff.segment_count_a} segments")
+    console.print(f"  B: {id_b[:10]}  ({vb.asr_model}/{vb.preprocess})  {diff.word_count_b} words, {diff.segment_count_b} segments")
+    console.print()
+
+    if diff.unified_diff:
+        console.print("[bold]Text diff:[/bold]")
+        for line in diff.unified_diff.splitlines():
+            if line.startswith("+") and not line.startswith("+++"):
+                console.print(f"[green]{line}[/green]")
+            elif line.startswith("-") and not line.startswith("---"):
+                console.print(f"[red]{line}[/red]")
+            elif line.startswith("@@"):
+                console.print(f"[cyan]{line}[/cyan]")
+            else:
+                console.print(line)
+    else:
+        console.print("[green]Texts are identical.[/green]")
+
+    if diff.segment_diffs:
+        console.print()
+        console.print(f"[bold]Segment-level differences ({len(diff.segment_diffs)}):[/bold]")
+        seg_table = Table()
+        seg_table.add_column("Time", style="dim")
+        seg_table.add_column("A", style="red")
+        seg_table.add_column("B", style="green")
+        for sd in diff.segment_diffs[:30]:
+            seg_table.add_row(sd["time_range"], sd["text_a"][:80], sd["text_b"][:80])
+        console.print(seg_table)
+        if len(diff.segment_diffs) > 30:
+            console.print(f"[dim]... and {len(diff.segment_diffs) - 30} more[/dim]")
+
+
+@variants.command("activate")
+@click.argument("variant_id")
+@click.pass_context
+def variants_activate(ctx: click.Context, variant_id: str) -> None:
+    """Promote a variant to active (writes its content to the .json on disk)."""
+    cfg = ctx.obj["config"]
+    vs = _build_variant_store(cfg)
+    if vs is None:
+        console.print("[red]Error: variant store not available[/red]")
+        sys.exit(1)
+
+    def _resolve(vid: str):
+        v = vs.get_variant(vid)
+        if v:
+            return v.variant_id
+        matches = [x for x in vs.list_variants(limit=500) if x.variant_id.startswith(vid)]
+        if len(matches) == 1:
+            return matches[0].variant_id
+        return None
+
+    resolved = _resolve(variant_id)
+    if not resolved:
+        console.print(f"[red]Variant not found: {variant_id}[/red]")
+        sys.exit(1)
+
+    ok = vs.activate_variant(resolved)
+    if ok:
+        v = vs.get_variant(resolved)
+        console.print(f"[green]Activated variant {resolved[:10]} for {v.audio_file}[/green]")
+    else:
+        console.print(f"[red]Failed to activate variant {variant_id}[/red]")
+        sys.exit(1)
+
+
+@variants.command("import")
+@click.argument("json_file", type=click.Path(exists=True, path_type=Path))
+@click.option("--parent", help="Parent variant ID (the variant this edit is based on)")
+@click.option("--notes", help="Optional notes about this edit")
+@click.option("--created-by", default="user", help="Who created this edit")
+@click.pass_context
+def variants_import(
+    ctx: click.Context,
+    json_file: Path,
+    parent: Optional[str],
+    notes: Optional[str],
+    created_by: str,
+) -> None:
+    """Import an edited transcript JSON as a new variant.
+
+    JSON_FILE is the path to the edited transcript JSON.
+    """
+    import json as _json
+
+    cfg = ctx.obj["config"]
+    vs = _build_variant_store(cfg)
+    if vs is None:
+        console.print("[red]Error: variant store not available[/red]")
+        sys.exit(1)
+
+    try:
+        with open(json_file, "r", encoding="utf-8") as f:
+            transcript_data = _json.load(f)
+    except Exception as exc:
+        console.print(f"[red]Failed to read JSON: {exc}[/red]")
+        sys.exit(1)
+
+    audio_file = transcript_data.get("audio_file")
+    if not audio_file:
+        console.print("[red]JSON missing 'audio_file' field[/red]")
+        sys.exit(1)
+
+    if parent:
+        def _resolve(vid: str):
+            v = vs.get_variant(vid)
+            if v:
+                return v.variant_id
+            matches = [x for x in vs.list_variants(limit=500) if x.variant_id.startswith(vid)]
+            if len(matches) == 1:
+                return matches[0].variant_id
+            return None
+
+        resolved_parent = _resolve(parent)
+        if not resolved_parent:
+            console.print(f"[red]Parent variant not found: {parent}[/red]")
+            sys.exit(1)
+
+        vid = vs.save_edit(
+            audio_file=audio_file,
+            transcript_data=transcript_data,
+            parent_variant_id=resolved_parent,
+            notes=notes,
+            created_by=created_by,
+        )
+    else:
+        try:
+            rel_path = str(json_file.parent.relative_to(cfg.output_dir))
+        except ValueError:
+            rel_path = str(json_file.parent)
+
+        vid = vs.save_variant(
+            audio_file=audio_file,
+            audio_path=rel_path,
+            asr_model="manual",
+            preprocess="n/a",
+            transcript_data=transcript_data,
+            variant_type="edit",
+            activate=False,
+            created_by=created_by,
+            notes=notes,
+        )
+
+    console.print(f"[green]Imported variant {vid[:10]} for {audio_file}[/green]")
+
+
+@variants.command("backfill")
+@click.option("--dir", "recordings_dir", type=click.Path(exists=True, path_type=Path),
+              help="Recordings directory to scan (default: from config)")
+@click.option("--model", default="whisper-large-v3",
+              help="ASR model to assign to existing transcripts")
+@click.option("--preprocess", default="unknown",
+              help="Preprocessing method to assign to existing transcripts")
+@click.pass_context
+def variants_backfill(
+    ctx: click.Context,
+    recordings_dir: Optional[Path],
+    model: str,
+    preprocess: str,
+) -> None:
+    """Scan existing transcript JSON files and register them as variants.
+
+    Idempotent -- re-running skips already-registered files.
+    """
+    cfg = ctx.obj["config"]
+    vs = _build_variant_store(cfg)
+    if vs is None:
+        console.print("[red]Error: variant store not available[/red]")
+        sys.exit(1)
+
+    scan_dir = recordings_dir or cfg.output_dir
+
+    console.print(f"[bold]Backfilling variants from {scan_dir}[/bold]")
+    console.print(f"  Default model: {model}")
+    console.print(f"  Default preprocess: {preprocess}")
+    console.print()
+
+    with console.status("[bold blue]Scanning..."):
+        count = vs.backfill(scan_dir, asr_model=model, preprocess=preprocess)
+
+    console.print(f"[green]Backfill complete: {count} new variants registered[/green]")
 
 
 if __name__ == '__main__':

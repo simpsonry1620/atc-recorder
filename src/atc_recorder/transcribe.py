@@ -11,10 +11,13 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Callable
+from typing import TYPE_CHECKING, Optional, Callable
 
 from .config import Config
 from .logging import get_logger
+
+if TYPE_CHECKING:
+    from .variant_store import TranscriptVariantStore
 
 logger = get_logger(__name__)
 
@@ -1237,12 +1240,23 @@ def export_srt(result: TranscriptionResult, output_path: Optional[Path] = None) 
     return output_path
 
 
-def save_transcript(result: TranscriptionResult, output_path: Optional[Path] = None) -> Path:
+def save_transcript(
+    result: TranscriptionResult,
+    output_path: Optional[Path] = None,
+    asr_model: str = "unknown",
+    preprocess: str = "unknown",
+    variant_store: Optional["TranscriptVariantStore"] = None,
+    recordings_root: Optional[Path] = None,
+) -> Path:
     """Save a transcription result to a JSON file.
     
     Args:
         result: TranscriptionResult object
         output_path: Optional output path. If None, saves alongside audio file.
+        asr_model: ASR model name for variant tracking.
+        preprocess: Preprocessing method for variant tracking.
+        variant_store: Optional variant store to register the transcript.
+        recordings_root: Root recordings directory for computing relative paths.
         
     Returns:
         Path to the saved transcript file
@@ -1268,6 +1282,24 @@ def save_transcript(result: TranscriptionResult, output_path: Optional[Path] = N
         json.dump(transcript_data, f, indent=2, ensure_ascii=False)
     
     result.transcript_file = output_path
+
+    if variant_store is not None:
+        try:
+            if recordings_root:
+                rel_path = str(output_path.parent.relative_to(recordings_root))
+            else:
+                rel_path = str(output_path.parent)
+            variant_store.save_variant(
+                audio_file=result.audio_file.name,
+                audio_path=rel_path,
+                asr_model=asr_model,
+                preprocess=preprocess,
+                transcript_data=transcript_data,
+                activate=True,
+            )
+        except Exception as exc:
+            logger.error("Failed to register transcript variant: %s", exc)
+
     return output_path
 
 
@@ -1425,6 +1457,8 @@ class TranscriptionWatcher:
         stitch_across_files: bool = False,
         stitch_max_gap_seconds: float = 2.0,
         stitch_min_text_overlap_chars: int = 12,
+        asr_model: str = "unknown",
+        variant_store: Optional[object] = None,
     ):
         """Initialize the watcher.
 
@@ -1440,6 +1474,8 @@ class TranscriptionWatcher:
             min_speech_duration: Min speech interval length (s)
             merge_gap_seconds: Merge speech intervals separated by shorter silence
             output_format: json, timestamped-txt, or srt (additional file when not json)
+            asr_model: ASR model name for variant tracking.
+            variant_store: Optional TranscriptVariantStore for variant tracking.
         """
         if not WATCHDOG_AVAILABLE:
             raise RuntimeError(
@@ -1464,6 +1500,8 @@ class TranscriptionWatcher:
         self._stitch_across_files = stitch_across_files
         self._stitch_max_gap_seconds = stitch_max_gap_seconds
         self._stitch_min_text_overlap_chars = stitch_min_text_overlap_chars
+        self._asr_model = asr_model
+        self._variant_store = variant_store
         self._observer = None
         self._running = False
     
@@ -1518,7 +1556,13 @@ class TranscriptionWatcher:
             )
 
             if result.success:
-                save_transcript(result)
+                save_transcript(
+                    result,
+                    asr_model=self._asr_model,
+                    preprocess=self._preprocess.value,
+                    variant_store=self._variant_store,
+                    recordings_root=self.watch_dir,
+                )
                 if result.transcript_file and self._stitch_across_files:
                     try:
                         stitched = stitch_transcript_boundary_with_previous(
@@ -1618,6 +1662,9 @@ def transcribe_file(
     stitch_across_files: bool = False,
     stitch_max_gap_seconds: float = 2.0,
     stitch_min_text_overlap_chars: int = 12,
+    asr_model: str = "unknown",
+    variant_store: Optional[object] = None,
+    recordings_root: Optional[Path] = None,
 ) -> TranscriptionResult:
     """Convenience function to transcribe a single file.
 
@@ -1635,6 +1682,9 @@ def transcribe_file(
         merge_gap_seconds: Merge speech intervals separated by shorter silence
         output_format: json, timestamped-txt, or srt (additional file when not json)
         periodic_timestamp_interval_sec: Insert markers every N seconds in timestamped-txt (0=off)
+        asr_model: ASR model name for variant tracking.
+        variant_store: Optional TranscriptVariantStore for variant tracking.
+        recordings_root: Root recordings directory for computing relative paths.
 
     Returns:
         TranscriptionResult object
@@ -1664,7 +1714,13 @@ def transcribe_file(
     )
 
     if save and result.success:
-        save_transcript(result)
+        save_transcript(
+            result,
+            asr_model=asr_model,
+            preprocess=preprocess.value,
+            variant_store=variant_store,
+            recordings_root=recordings_root,
+        )
         if result.transcript_file and stitch_across_files:
             stitched = stitch_transcript_boundary_with_previous(
                 result.transcript_file,
@@ -1702,6 +1758,8 @@ def watch_and_transcribe(
     stitch_across_files: bool = False,
     stitch_max_gap_seconds: float = 2.0,
     stitch_min_text_overlap_chars: int = 12,
+    asr_model: str = "unknown",
+    variant_store: Optional[object] = None,
 ) -> None:
     """Watch a directory and transcribe new audio files.
 
@@ -1717,6 +1775,8 @@ def watch_and_transcribe(
         min_speech_duration: Min speech interval length (s)
         merge_gap_seconds: Merge speech intervals separated by shorter silence
         output_format: json, timestamped-txt, or srt
+        asr_model: ASR model name for variant tracking.
+        variant_store: Optional TranscriptVariantStore for variant tracking.
     """
     # Get defaults from environment
     if grpc_host is None:
@@ -1752,6 +1812,8 @@ def watch_and_transcribe(
         stitch_across_files=stitch_across_files,
         stitch_max_gap_seconds=stitch_max_gap_seconds,
         stitch_min_text_overlap_chars=stitch_min_text_overlap_chars,
+        asr_model=asr_model,
+        variant_store=variant_store,
     )
 
     watcher.run_forever()
@@ -1943,11 +2005,15 @@ def compare_preprocessing(
     grpc_port: int = None,
     language_code: str = "en-US",
     output_dir: Optional[Path] = None,
+    asr_model: str = "unknown",
+    variant_store: Optional[object] = None,
+    recordings_root: Optional[Path] = None,
 ) -> dict[str, TranscriptionResult]:
     """Compare transcription results using different preprocessing methods.
     
     Transcribes the same audio file with no preprocessing, ffmpeg filters,
-    and sox noise reduction, then saves comparison results.
+    and sox noise reduction, then saves comparison results.  Each result is
+    also registered as a variant when a variant_store is provided.
     
     Args:
         audio_path: Path to the audio file to test
@@ -1955,6 +2021,9 @@ def compare_preprocessing(
         grpc_port: Whisper gRPC port (default from env WHISPER_GRPC_PORT)
         language_code: Language code for transcription
         output_dir: Directory to save comparison results (default: same as audio)
+        asr_model: ASR model name for variant tracking.
+        variant_store: Optional TranscriptVariantStore for variant tracking.
+        recordings_root: Root recordings directory for computing relative paths.
         
     Returns:
         Dict mapping preprocessing method name to TranscriptionResult
@@ -2000,6 +2069,7 @@ def compare_preprocessing(
         methods.append(("sox", AudioPreprocess.SOX))
     
     base_name = audio_path.stem
+    is_first = True
     
     for method_name, preprocess in methods:
         logger.info(f"\n{'='*60}")
@@ -2013,7 +2083,6 @@ def compare_preprocessing(
         results[method_name] = result
         
         if result.success:
-            # Save with method suffix
             output_path = output_dir / f"{base_name}_transcript_{method_name}.json"
             result.transcript_file = output_path
             
@@ -2029,6 +2098,24 @@ def compare_preprocessing(
             
             with open(output_path, 'w', encoding='utf-8') as f:
                 json.dump(transcript_data, f, indent=2, ensure_ascii=False)
+
+            if variant_store is not None:
+                try:
+                    if recordings_root:
+                        rel_path = str(audio_path.parent.relative_to(recordings_root))
+                    else:
+                        rel_path = str(audio_path.parent)
+                    variant_store.save_variant(
+                        audio_file=audio_path.name,
+                        audio_path=rel_path,
+                        asr_model=asr_model,
+                        preprocess=method_name,
+                        transcript_data=transcript_data,
+                        activate=is_first,
+                    )
+                except Exception as exc:
+                    logger.error("Failed to register comparison variant: %s", exc)
+            is_first = False
             
             logger.info(f"  Time: {elapsed:.1f}s")
             logger.info(f"  Saved: {output_path}")

@@ -33,6 +33,7 @@ class TranscriptionConfig:
     stitch_across_files: bool = False
     stitch_max_gap_seconds: float = 2.0
     stitch_min_text_overlap_chars: int = 12
+    variant_store_path: str = "./recordings/transcripts.db"
 
 
 @dataclass
@@ -186,6 +187,7 @@ class Config:
                 stitch_across_files=t.get('stitch_across_files', False),
                 stitch_max_gap_seconds=t.get('stitch_max_gap_seconds', 2.0),
                 stitch_min_text_overlap_chars=t.get('stitch_min_text_overlap_chars', 12),
+                variant_store_path=t.get('variant_store_path', './recordings/transcripts.db'),
             )
 
         rag_config = None
@@ -305,6 +307,7 @@ class Config:
                 'stitch_across_files': self.transcription.stitch_across_files,
                 'stitch_max_gap_seconds': self.transcription.stitch_max_gap_seconds,
                 'stitch_min_text_overlap_chars': self.transcription.stitch_min_text_overlap_chars,
+                'variant_store_path': self.transcription.variant_store_path,
             }
         if self.rag is not None:
             d["rag"] = {
