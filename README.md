@@ -9,6 +9,7 @@ Record and download Air Traffic Control (ATC) audio from LiveATC.net for later t
 - **Feed Discovery**: Automatically discover available feeds for any airport
 - **Organized Output**: Files organized by feed and date with metadata
 - **Speech-to-Text**: Automatic transcription using NVIDIA Whisper ASR (GPU required)
+- **GUI ASR Trigger**: Run ASR from the dashboard with model and preprocessing selection
 
 ## Requirements
 
@@ -110,6 +111,7 @@ recording:
   max_retries: 5
 
 transcription:
+  preprocess: ffmpeg_vad
   segment_by_pauses: false
   min_silence_duration: 0.5
   silence_threshold_dB: -30
@@ -154,6 +156,25 @@ docker compose run --rm atc-recorder record kdca1_gnd --duration 30m
 docker compose --profile archive run --rm atc-archiver download kdca1_gnd --date 2026-02-01
 ```
 
+### One-Command Launcher
+
+Use the interactive launcher script to avoid manually running multiple compose commands:
+
+```bash
+./scripts/launch_app.sh
+```
+
+It prompts for:
+- services to start (dashboard, Whisper, Parakeet, RAG, workers)
+- optional image build
+- GPU index selection for Whisper/Parakeet
+
+You can also run it non-interactively with flags:
+
+```bash
+./scripts/launch_app.sh --build yes --dashboard yes --whisper yes --parakeet no --rag no --workers yes --non-interactive
+```
+
 ### Running as a Daemon
 
 ```bash
@@ -179,7 +200,9 @@ docker compose --profile cron up -d atc-archive-cron
 
 ### Automatic Speech Recognition (ASR)
 
-The project includes NVIDIA Whisper ASR integration for automatic transcription of recordings.
+The project supports two NVIDIA NIM ASR workflows for transcription:
+- Whisper: `whisper-large-v3` (profile: `asr`)
+- Parakeet: `parakeet-tdt-0.6b-v2` (profile: `asr-parakeet`)
 
 #### Requirements
 
@@ -203,35 +226,48 @@ The project includes NVIDIA Whisper ASR integration for automatic transcription 
    docker login nvcr.io -u '$oauthtoken' -p $NGC_API_KEY
    ```
 
-4. Start the ASR services:
+4. Start the Whisper ASR services:
    ```bash
    docker compose --profile asr up -d
    ```
 
    Note: First startup may take up to 30 minutes while the model downloads.
 
-5. Check if the service is ready:
+5. Check if Whisper is ready:
    ```bash
    curl http://localhost:9000/v1/health/ready
+   ```
+
+6. (Optional) Start the Parakeet ASR workflow:
+   ```bash
+   docker compose --profile asr-parakeet up -d
+   ```
+
+   Check Parakeet readiness on host port `9001`:
+   ```bash
+   curl http://localhost:9001/v1/health/ready
    ```
 
 #### Transcribe a Single File
 
 ```bash
-# Transcribe an audio file
-docker compose run --rm atc-recorder transcribe recordings/kdca1_gnd/2026-02-04/kdca1_gnd_2026-02-04_1200Z.mp3
+# Transcribe an audio file via Whisper backend
+docker compose --profile asr run --rm transcription-worker transcribe recordings/kdca1_gnd/2026-02-04/kdca1_gnd_2026-02-04_1200Z.mp3
 
 # Segment by pauses (one segment per utterance) and write timestamped .txt
-docker compose run --rm atc-recorder transcribe --segment-by-pauses --output-format timestamped-txt recordings/.../file.mp3
+docker compose --profile asr run --rm transcription-worker transcribe --segment-by-pauses --output-format timestamped-txt recordings/.../file.mp3
 
 # Add role diarization labels and stitch boundary transmissions
-docker compose run --rm atc-recorder transcribe --segment-by-pauses --diarization --stitch-across-files recordings/.../file.mp3
+docker compose --profile asr run --rm transcription-worker transcribe --segment-by-pauses --diarization --stitch-across-files recordings/.../file.mp3
 
 # Also export SRT subtitles
-docker compose run --rm atc-recorder transcribe --segment-by-pauses --output-format srt recordings/.../file.mp3
+docker compose --profile asr run --rm transcription-worker transcribe --segment-by-pauses --output-format srt recordings/.../file.mp3
 
 # Check connection to Whisper service
-docker compose run --rm atc-recorder transcribe --check recordings/any-file.mp3
+docker compose --profile asr run --rm transcription-worker transcribe --check recordings/any-file.mp3
+
+# Use Parakeet backend for single-file transcription
+docker compose --profile asr-parakeet run --rm parakeet-transcription-worker transcribe recordings/.../file.mp3
 ```
 
 #### Automatic Transcription
@@ -244,29 +280,40 @@ docker compose --profile asr up -d
 
 # View transcription worker logs
 docker compose logs -f transcription-worker
+
+# Start Parakeet ASR services (includes dedicated worker)
+docker compose --profile asr-parakeet up -d
+
+# View Parakeet worker logs
+docker compose logs -f parakeet-transcription-worker
 ```
 
-The worker reads optional `transcription` settings from `config.yaml` (pause segmentation thresholds, output format, role diarization, and cross-file stitching).
+If you run both Whisper and Parakeet workers, do not have both watchers transcribe the same directory at the same time unless overwriting/skip behavior is acceptable. For clean A/B testing, run one backend at a time with `transcribe-all --force`.
+
+The worker reads optional `transcription` settings from `config.yaml` (audio preprocessing mode, pause segmentation thresholds, output format, role diarization, and cross-file stitching).
 
 #### Transcribe Existing Recordings
 
 Use the batch command to process files already on disk:
 
 ```bash
-# Transcribe only files that do not have JSON transcripts yet
-docker compose run --rm atc-recorder transcribe-all
+# Transcribe only files that do not have JSON transcripts yet (Whisper)
+docker compose --profile asr run --rm transcription-worker transcribe-all
 
-# Show what would be transcribed, without running ASR
-docker compose run --rm atc-recorder transcribe-all --dry-run
+# Show what would be transcribed, without running ASR (Whisper)
+docker compose --profile asr run --rm transcription-worker transcribe-all --dry-run
 
-# Re-transcribe all audio files, including ones with existing transcripts
-docker compose run --rm atc-recorder transcribe-all --force
+# Re-transcribe all audio files, including ones with existing transcripts (Whisper)
+docker compose --profile asr run --rm transcription-worker transcribe-all --force
 
-# Batch mode with pause segmentation and SRT export
-docker compose run --rm atc-recorder transcribe-all --segment-by-pauses --output-format srt
+# Batch mode with pause segmentation and SRT export (Whisper)
+docker compose --profile asr run --rm transcription-worker transcribe-all --segment-by-pauses --output-format srt
 
-# Batch mode with role diarization + cross-file stitching
-docker compose run --rm atc-recorder transcribe-all --segment-by-pauses --diarization --stitch-across-files
+# Batch mode with role diarization + cross-file stitching (Whisper)
+docker compose --profile asr run --rm transcription-worker transcribe-all --segment-by-pauses --diarization --stitch-across-files
+
+# Batch re-transcription using Parakeet backend
+docker compose --profile asr-parakeet run --rm parakeet-transcription-worker transcribe-all --force
 ```
 
 #### Compare Audio Preprocessing Methods
@@ -274,7 +321,14 @@ docker compose run --rm atc-recorder transcribe-all --segment-by-pauses --diariz
 To evaluate transcript quality with different preprocessing chains:
 
 ```bash
-docker compose run --rm atc-recorder transcribe-compare recordings/.../file.mp3
+docker compose --profile asr run --rm transcription-worker transcribe-compare recordings/.../file.mp3
+```
+
+To compare Whisper vs Parakeet end-to-end, run the same file through each worker:
+
+```bash
+docker compose --profile asr run --rm transcription-worker transcribe recordings/.../file.mp3
+docker compose --profile asr-parakeet run --rm parakeet-transcription-worker transcribe recordings/.../file.mp3
 ```
 
 This creates multiple transcript files (for example `*_transcript_none.json`, `*_transcript_ffmpeg.json`, and `*_transcript_ffmpeg_vad.json`; `*_transcript_sox.json` is included when `sox` is available) so you can compare recognition quality.

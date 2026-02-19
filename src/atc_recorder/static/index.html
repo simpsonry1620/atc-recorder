@@ -41,6 +41,8 @@
       <button class="tab-btn active" data-tab="overview">Overview</button>
       <button class="tab-btn" data-tab="browser">Transcripts</button>
       <button class="tab-btn" data-tab="search">Search</button>
+      <button class="tab-btn" data-tab="flights">Flights</button>
+      <button class="tab-btn" data-tab="profile">Positions</button>
       <button class="tab-btn" data-tab="embeddings">Embeddings</button>
     </nav>
 
@@ -80,6 +82,30 @@
           <button id="br-load" class="btn-primary h-10">Load</button>
         </div>
 
+        <div class="card mb-4">
+          <h3 class="card-title">Run ASR</h3>
+          <div class="mt-3 flex flex-wrap gap-3 items-end">
+            <div>
+              <label class="label">Model</label>
+              <select id="br-asr-model" class="input w-56">
+                <option value="whisper">Whisper (whisper-large-v3)</option>
+                <option value="parakeet">Parakeet (parakeet-tdt-0.6b-v2)</option>
+              </select>
+            </div>
+            <div>
+              <label class="label">Preprocessing</label>
+              <select id="br-asr-preprocess" class="input w-48">
+                <option value="none">none</option>
+                <option value="ffmpeg">ffmpeg</option>
+                <option value="ffmpeg_vad" selected>ffmpeg_vad</option>
+                <option value="sox">sox</option>
+              </select>
+            </div>
+            <button id="br-transcribe" class="btn-primary h-10">Run ASR</button>
+          </div>
+          <p id="br-transcribe-status" class="text-sm text-gray-400 mt-3">Select a recording, then run ASR.</p>
+        </div>
+
         <div id="br-player" class="hidden mb-4">
           <audio id="br-audio" controls class="w-full rounded-lg"></audio>
         </div>
@@ -110,6 +136,72 @@
         </div>
         <div id="se-results" class="space-y-3"></div>
         <div id="se-empty" class="text-gray-500 text-center py-12 hidden">Enter a query and press Search</div>
+      </section>
+
+      <!-- ═══════════ FLIGHT TRACKER ═══════════ -->
+      <section id="panel-flights" class="tab-panel hidden p-6">
+        <div class="flex flex-wrap gap-3 items-end mb-6">
+          <div class="flex-1 min-w-[260px]">
+            <label class="label">Callsign</label>
+            <input id="ft-callsign" type="text" class="input w-full" placeholder="e.g. DAL1234, UAL456, N123AB" />
+          </div>
+          <button id="ft-go" class="btn-primary h-10">Track Flight</button>
+        </div>
+
+        <div id="ft-track" class="hidden space-y-4">
+          <div id="ft-info" class="card"></div>
+          <h3 class="text-sm font-semibold text-gray-400 uppercase tracking-wider">Frequency Timeline</h3>
+          <div id="ft-timeline" class="space-y-2"></div>
+        </div>
+
+        <div id="ft-recent" class="space-y-1">
+          <h3 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Recently Active Flights</h3>
+          <div id="ft-recent-list" class="space-y-1 text-sm"></div>
+          <div id="ft-empty" class="text-gray-500 text-center py-12">Loading recent flights...</div>
+        </div>
+      </section>
+
+      <!-- ═══════════ CONTROLLER / POSITION PROFILE ═══════════ -->
+      <section id="panel-profile" class="tab-panel hidden p-6">
+        <div class="flex flex-wrap gap-3 items-end mb-6">
+          <div>
+            <label class="label">Feed / Position</label>
+            <select id="cp-feed" class="input w-52"></select>
+          </div>
+          <div>
+            <label class="label">Start time</label>
+            <input id="cp-start" type="datetime-local" class="input w-52" />
+          </div>
+          <div>
+            <label class="label">End time</label>
+            <input id="cp-end" type="datetime-local" class="input w-52" />
+          </div>
+          <button id="cp-go" class="btn-primary h-10">Load Profile</button>
+        </div>
+
+        <div id="cp-profile" class="hidden space-y-4">
+          <div id="cp-stats" class="grid grid-cols-2 md:grid-cols-4 gap-4"></div>
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <div class="card">
+              <h3 class="card-title">Phraseology Breakdown</h3>
+              <div id="cp-phrases" class="mt-3 space-y-1 max-h-80 overflow-y-auto text-sm"></div>
+            </div>
+            <div class="card">
+              <h3 class="card-title">Busiest Hours (UTC)</h3>
+              <div id="cp-hours" class="mt-3" style="height:200px;"></div>
+            </div>
+          </div>
+          <div class="card">
+            <h3 class="card-title">Active Callsigns</h3>
+            <div id="cp-callsigns" class="mt-3 flex flex-wrap gap-2 max-h-40 overflow-y-auto"></div>
+          </div>
+        </div>
+
+        <div id="cp-summary" class="space-y-1">
+          <h3 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">All Positions Summary</h3>
+          <div id="cp-summary-list" class="space-y-1 text-sm"></div>
+          <div id="cp-empty" class="text-gray-500 text-center py-12">Loading position data...</div>
+        </div>
       </section>
 
       <!-- ═══════════ EMBEDDING EXPLORER ═══════════ -->

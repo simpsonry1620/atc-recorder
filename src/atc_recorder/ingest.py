@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -11,6 +12,7 @@ from typing import Optional
 
 from .config import Config
 from .embedding import EmbeddingClient, create_embedding_client
+from .entities import EntityMention, extract_entities
 from .logging import get_logger
 from .rag_models import SearchFilters, SearchHit, TranscriptDocument
 from .vector_store import VectorStoreAdapter, create_vector_store
@@ -30,7 +32,11 @@ def _safe_text(value: object) -> str:
 
 
 def _parse_feed_id(audio_file_name: str) -> str:
-    # Expected pattern: feedid_YYYY-MM-DD_HHMMZ.mp3
+    # Pattern: {feed_id}_{YYYY-MM-DD}_{HHMMZ}.mp3
+    # Feed IDs can contain underscores (e.g., kdca1_app_final)
+    m = re.match(r"^(.+?)_(\d{4}-\d{2}-\d{2})_\d{4}Z?\.mp3$", audio_file_name)
+    if m:
+        return m.group(1)
     if "_" not in audio_file_name:
         return "unknown"
     return audio_file_name.split("_", 1)[0]
@@ -94,6 +100,34 @@ class MetadataStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_docs_feed_time ON transcript_docs(feed_id, start_time_utc, end_time_utc)"
             )
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS entity_mentions (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    doc_id TEXT NOT NULL,
+                    entity_type TEXT NOT NULL,
+                    raw_text TEXT NOT NULL,
+                    normalized TEXT NOT NULL,
+                    confidence REAL NOT NULL,
+                    feed_id TEXT NOT NULL,
+                    timestamp_utc TEXT NOT NULL,
+                    start_offset INTEGER,
+                    end_offset INTEGER
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_normalized ON entity_mentions(normalized, timestamp_utc)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_feed ON entity_mentions(feed_id, timestamp_utc)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_type ON entity_mentions(entity_type, normalized)"
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_entity_doc ON entity_mentions(doc_id)"
+            )
             conn.commit()
 
     def upsert_documents(self, docs: list[TranscriptDocument]) -> int:
@@ -133,6 +167,145 @@ class MetadataStore:
             )
             conn.commit()
         return len(docs)
+
+    def upsert_entity_mentions(
+        self, doc_id: str, feed_id: str, timestamp_utc: str, entities: list[EntityMention]
+    ) -> int:
+        if not entities:
+            return 0
+        with self._conn() as conn:
+            conn.execute("DELETE FROM entity_mentions WHERE doc_id = ?", (doc_id,))
+            conn.executemany(
+                """
+                INSERT INTO entity_mentions (
+                    doc_id, entity_type, raw_text, normalized, confidence,
+                    feed_id, timestamp_utc, start_offset, end_offset
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        doc_id,
+                        e.entity_type,
+                        e.raw_text,
+                        e.normalized,
+                        e.confidence,
+                        feed_id,
+                        timestamp_utc,
+                        e.start_offset,
+                        e.end_offset,
+                    )
+                    for e in entities
+                ],
+            )
+            conn.commit()
+        return len(entities)
+
+    def search_entities(
+        self,
+        normalized: Optional[str] = None,
+        entity_type: Optional[str] = None,
+        feed_id: Optional[str] = None,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+        limit: int = 200,
+    ) -> list[dict]:
+        where = []
+        params: list[object] = []
+        if normalized:
+            where.append("em.normalized = ?")
+            params.append(normalized)
+        if entity_type:
+            where.append("em.entity_type = ?")
+            params.append(entity_type)
+        if feed_id:
+            where.append("em.feed_id = ?")
+            params.append(feed_id)
+        if start_time:
+            where.append("em.timestamp_utc >= ?")
+            params.append(start_time)
+        if end_time:
+            where.append("em.timestamp_utc <= ?")
+            params.append(end_time)
+        where_sql = " AND ".join(where) if where else "1=1"
+        sql = f"""
+            SELECT em.*, td.text, td.audio_file
+            FROM entity_mentions em
+            LEFT JOIN transcript_docs td ON em.doc_id = td.doc_id
+            WHERE {where_sql}
+            ORDER BY em.timestamp_utc DESC
+            LIMIT ?
+        """
+        params.append(limit)
+        with self._conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_flight_timeline(self, normalized_callsign: str, limit: int = 500) -> list[dict]:
+        """Get all mentions of a callsign ordered by time, grouped by feed."""
+        sql = """
+            SELECT em.normalized, em.feed_id, em.timestamp_utc, em.raw_text,
+                   em.entity_type, em.confidence, em.doc_id,
+                   td.text, td.audio_file, td.start_time_utc, td.end_time_utc
+            FROM entity_mentions em
+            LEFT JOIN transcript_docs td ON em.doc_id = td.doc_id
+            WHERE em.normalized = ? AND em.entity_type = 'callsign'
+            ORDER BY em.timestamp_utc ASC
+            LIMIT ?
+        """
+        with self._conn() as conn:
+            rows = conn.execute(sql, (normalized_callsign, limit)).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_active_callsigns(
+        self, feed_id: Optional[str] = None, start_time: Optional[str] = None, end_time: Optional[str] = None, limit: int = 100
+    ) -> list[dict]:
+        """Get distinct callsigns active in a time window, optionally on a specific feed."""
+        where = ["em.entity_type = 'callsign'"]
+        params: list[object] = []
+        if feed_id:
+            where.append("em.feed_id = ?")
+            params.append(feed_id)
+        if start_time:
+            where.append("em.timestamp_utc >= ?")
+            params.append(start_time)
+        if end_time:
+            where.append("em.timestamp_utc <= ?")
+            params.append(end_time)
+        where_sql = " AND ".join(where)
+        sql = f"""
+            SELECT em.normalized, em.feed_id,
+                   COUNT(*) as mention_count,
+                   MIN(em.timestamp_utc) as first_seen,
+                   MAX(em.timestamp_utc) as last_seen
+            FROM entity_mentions em
+            WHERE {where_sql}
+            GROUP BY em.normalized
+            ORDER BY last_seen DESC
+            LIMIT ?
+        """
+        params.append(limit)
+        with self._conn() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_recent_flights(self, limit: int = 50) -> list[dict]:
+        """Get most recently seen callsigns with feed and time info."""
+        sql = """
+            SELECT em.normalized,
+                   COUNT(*) as mention_count,
+                   COUNT(DISTINCT em.feed_id) as feed_count,
+                   GROUP_CONCAT(DISTINCT em.feed_id) as feeds,
+                   MIN(em.timestamp_utc) as first_seen,
+                   MAX(em.timestamp_utc) as last_seen
+            FROM entity_mentions em
+            WHERE em.entity_type = 'callsign'
+            GROUP BY em.normalized
+            ORDER BY last_seen DESC
+            LIMIT ?
+        """
+        with self._conn() as conn:
+            rows = conn.execute(sql, (limit,)).fetchall()
+        return [dict(row) for row in rows]
 
     def search_by_filters(self, filters: SearchFilters, limit: int = 100) -> list[dict]:
         where = []
@@ -236,6 +409,7 @@ class TranscriptIngestionService:
                 role = seg.get("speaker_role")
                 if isinstance(role, str) and role:
                     quality_flags.append(f"role:{role.lower()}")
+                entities = extract_entities(text)
                 docs.append(
                     TranscriptDocument(
                         doc_id=_doc_id(audio_file, idx, start_s, end_s),
@@ -246,6 +420,7 @@ class TranscriptIngestionService:
                         end_time_utc=end_dt,
                         text=text,
                         quality_flags=quality_flags,
+                        entities=entities,
                     )
                 )
         else:
@@ -285,6 +460,11 @@ class TranscriptIngestionService:
             vectors = [self.embedding_client.embed_text(doc.text).vector for doc in docs]
             upserted = self.vector_store.upsert_documents(docs, vectors)
             self.metadata_store.upsert_documents(docs)
+            for doc in docs:
+                if doc.entities:
+                    self.metadata_store.upsert_entity_mentions(
+                        doc.doc_id, doc.feed_id, doc.start_time_utc.isoformat(), doc.entities
+                    )
             stats.files_processed += 1
             stats.docs_upserted += upserted
             elapsed_ms = int((time.perf_counter() - t0) * 1000)
@@ -312,6 +492,27 @@ class TranscriptIngestionService:
             total.docs_skipped += file_stats.docs_skipped
             total.errors += file_stats.errors
         return total
+
+    def backfill_entities(self, recordings_dir: Path) -> dict:
+        """Extract entities from existing transcript JSONs and store in entity_mentions."""
+        stats = {"files": 0, "entities": 0, "errors": 0}
+        for path in sorted(Path(recordings_dir).rglob("*.json")):
+            if path.name == "metadata.json":
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                docs = self._build_documents(path, data)
+                for doc in docs:
+                    if doc.entities:
+                        self.metadata_store.upsert_entity_mentions(
+                            doc.doc_id, doc.feed_id, doc.start_time_utc.isoformat(), doc.entities
+                        )
+                        stats["entities"] += len(doc.entities)
+                stats["files"] += 1
+            except Exception as exc:
+                logger.error("Entity backfill failed for %s: %s", path, exc)
+                stats["errors"] += 1
+        return stats
 
     def search(self, query: str, filters: SearchFilters, top_k: int) -> list[SearchHit]:
         t0 = time.perf_counter()

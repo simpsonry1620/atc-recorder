@@ -17,6 +17,7 @@ class TranscriptDocument:
     end_time_utc: datetime
     text: str
     quality_flags: list[str] = field(default_factory=list)
+    entities: list = field(default_factory=list)
     ingested_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -28,6 +29,7 @@ class SearchFilters:
     end_time_utc: Optional[datetime] = None
     feed_ids: Optional[list[str]] = None
     exclude_feed_ids: Optional[list[str]] = None
+    callsign: Optional[str] = None
 
 
 @dataclass

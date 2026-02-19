@@ -10,6 +10,8 @@ LABEL org.opencontainers.image.version="0.1.0"
 # Install runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
+    sox \
+    libsox-fmt-mp3 \
     curl \
     && rm -rf /var/lib/apt/lists/* \
     && useradd --create-home --shell /bin/bash atc
@@ -18,8 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 
 # Copy requirements and install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+COPY requirements.txt requirements-transcriber.txt ./
+RUN pip install --no-cache-dir -r requirements.txt -r requirements-transcriber.txt
 
 # Copy application code
 COPY --chown=atc:atc pyproject.toml README.md ./

@@ -2,6 +2,8 @@
 
 import json
 import os
+import re
+import socket
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -17,6 +19,7 @@ from .logging import get_logger
 logger = get_logger(__name__)
 
 STATIC_DIR = Path(__file__).parent / "static"
+_ESTIMATED_MP3_BITRATE_BPS = 128_000
 
 
 def _recordings_dir(config: Config) -> Path:
@@ -53,12 +56,78 @@ def _scan_recordings(recordings: Path, feed_id: str, date: str) -> list[dict]:
     return items
 
 
+def _load_duration_seconds_by_file(day_dir: Path) -> dict[str, float]:
+    """Load duration_seconds from day-level metadata.json keyed by file name."""
+    metadata_path = day_dir / "metadata.json"
+    if not metadata_path.exists():
+        return {}
+
+    try:
+        raw = json.loads(metadata_path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+    if isinstance(raw, dict):
+        entries = [raw]
+    elif isinstance(raw, list):
+        entries = raw
+    else:
+        return {}
+
+    durations: dict[str, float] = {}
+    for item in entries:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("file")
+        duration = item.get("duration_seconds")
+        if not isinstance(name, str) or not isinstance(duration, (int, float)):
+            continue
+        # If duplicate entries exist, keep the latest valid value in the file.
+        durations[name] = float(duration)
+
+    return durations
+
+
+def _resolve_recording_start(recordings: Path, audio_file: str) -> Optional[datetime]:
+    """Resolve the actual recording start time from metadata.json or filename."""
+    m = re.match(r"^(.+?)_(\d{4}-\d{2}-\d{2})_(\d{2})(\d{2})Z?\.mp3$", audio_file)
+    if not m:
+        return None
+    feed_id, date_str, hh, mm = m.group(1), m.group(2), m.group(3), m.group(4)
+    meta_path = recordings / feed_id / date_str / "metadata.json"
+    if meta_path.exists():
+        try:
+            raw = json.loads(meta_path.read_text(encoding="utf-8"))
+            entries = [raw] if isinstance(raw, dict) else raw if isinstance(raw, list) else []
+            for entry in entries:
+                if entry.get("file") == audio_file and entry.get("start_time"):
+                    ts = entry["start_time"].replace("Z", "+00:00")
+                    return datetime.fromisoformat(ts).astimezone(timezone.utc)
+        except Exception:
+            pass
+    try:
+        return datetime.strptime(f"{date_str} {hh}{mm}", "%Y-%m-%d %H%M").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _audio_offset_seconds(recordings: Path, audio_file: str, segment_utc: datetime) -> float:
+    """Compute the offset in seconds from the start of the audio file to a segment time."""
+    rec_start = _resolve_recording_start(recordings, audio_file)
+    if rec_start is None:
+        return 0.0
+    return max(0.0, (segment_utc - rec_start).total_seconds())
+
+
 def _pipeline_stats(recordings: Path) -> dict:
     feed_dirs = [d for d in recordings.iterdir() if d.is_dir()] if recordings.is_dir() else []
     feeds = [d.name for d in feed_dirs if not d.name.startswith(".")]
     mp3_count = 0
     json_count = 0
     total_bytes = 0
+    total_duration_seconds = 0.0
+    metadata_covered_recordings = 0
+    estimated_fallback_bytes = 0
     dates: set[str] = set()
     recent: list[dict] = []
 
@@ -69,10 +138,18 @@ def _pipeline_stats(recordings: Path) -> dict:
             if not date_dir.is_dir():
                 continue
             dates.add(date_dir.name)
+            duration_by_file = _load_duration_seconds_by_file(date_dir)
             for f in date_dir.iterdir():
                 if f.suffix == ".mp3":
                     mp3_count += 1
-                    total_bytes += f.stat().st_size
+                    size_bytes = f.stat().st_size
+                    total_bytes += size_bytes
+                    duration_seconds = duration_by_file.get(f.name)
+                    if duration_seconds is not None:
+                        total_duration_seconds += duration_seconds
+                        metadata_covered_recordings += 1
+                    else:
+                        estimated_fallback_bytes += size_bytes
                 elif f.suffix == ".json" and f.name != "metadata.json":
                     json_count += 1
                     try:
@@ -88,6 +165,10 @@ def _pipeline_stats(recordings: Path) -> dict:
 
     recent.sort(key=lambda r: r["modified"], reverse=True)
     sorted_dates = sorted(dates)
+    estimated_fallback_seconds = estimated_fallback_bytes / (_ESTIMATED_MP3_BITRATE_BPS / 8)
+    total_audio_hours = round((total_duration_seconds + estimated_fallback_seconds) / 3600, 1)
+    fallback_recordings = mp3_count - metadata_covered_recordings
+    coverage_pct = (metadata_covered_recordings / mp3_count * 100.0) if mp3_count else 0.0
 
     return {
         "feeds": sorted(feeds),
@@ -95,7 +176,11 @@ def _pipeline_stats(recordings: Path) -> dict:
         "recording_count": mp3_count,
         "transcript_count": json_count,
         "total_audio_bytes": total_bytes,
-        "total_audio_hours": round(total_bytes / (128_000 / 8 * 3600), 1),  # ~128kbps MP3
+        "total_audio_hours": total_audio_hours,
+        "audio_hours_source": "metadata_with_size_fallback",
+        "audio_hours_metadata_recordings": metadata_covered_recordings,
+        "audio_hours_estimated_recordings": fallback_recordings,
+        "audio_hours_metadata_coverage_pct": round(coverage_pct, 1),
         "date_range": {
             "earliest": sorted_dates[0] if sorted_dates else None,
             "latest": sorted_dates[-1] if sorted_dates else None,
@@ -128,6 +213,15 @@ def _check_service_health(url: str, timeout: float = 3.0) -> bool:
         return False
 
 
+def _check_tcp_port(host: str, port: int, timeout: float = 2.0) -> bool:
+    """Best-effort TCP connectivity check for internal service ports."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except Exception:
+        return False
+
+
 def create_app(config: Config) -> FastAPI:
     """Build the FastAPI dashboard application."""
 
@@ -153,7 +247,13 @@ def create_app(config: Config) -> FastAPI:
         services: dict[str, bool | None] = {}
         # Whisper ASR
         whisper_host = os.environ.get("WHISPER_GRPC_HOST", "whisper-asr")
-        services["whisper_asr"] = _check_service_health(f"http://{whisper_host}:9000/v1/health/ready")
+        whisper_http_ok = _check_service_health(f"http://{whisper_host}:9000/v1/health/ready")
+        whisper_grpc_ok = _check_tcp_port(whisper_host, int(os.environ.get("WHISPER_GRPC_PORT", "50051")))
+        services["whisper_asr"] = whisper_http_ok or whisper_grpc_ok
+        parakeet_host = os.environ.get("PARAKEET_GRPC_HOST", "parakeet-asr")
+        parakeet_http_ok = _check_service_health(f"http://{parakeet_host}:9000/v1/health/ready")
+        parakeet_grpc_ok = _check_tcp_port(parakeet_host, int(os.environ.get("PARAKEET_GRPC_PORT", "50051")))
+        services["parakeet_asr"] = parakeet_http_ok or parakeet_grpc_ok
 
         if config.rag and config.rag.enabled:
             emb_endpoint = config.rag.embedding.endpoint
@@ -215,6 +315,169 @@ def create_app(config: Config) -> FastAPI:
             raise HTTPException(404, "Audio file not found")
         return FileResponse(path, media_type="audio/mpeg", filename=filename)
 
+    # ── ASR transcription (GUI trigger) ────────────────────────────
+    @app.post("/api/asr/transcribe")
+    async def transcribe_from_dashboard(request: Request):
+        body = await request.json()
+        feed_id = str(body.get("feed_id", "")).strip()
+        date = str(body.get("date", "")).strip()
+        filename = str(body.get("filename", "")).strip()
+        model = str(body.get("model", "whisper")).strip().lower()
+        preprocess = str(body.get("preprocess", "none")).strip().lower()
+
+        if not feed_id or not date or not filename:
+            raise HTTPException(400, "feed_id, date, and filename are required")
+
+        if not filename.endswith(".mp3"):
+            filename = f"{filename}.mp3"
+        audio_path = recordings / feed_id / date / filename
+        if not audio_path.exists():
+            raise HTTPException(404, f"Audio file not found: {filename}")
+
+        host_port_by_model = {
+            "whisper": (
+                os.environ.get("WHISPER_GRPC_HOST", "whisper-asr"),
+                int(os.environ.get("WHISPER_GRPC_PORT", "50051")),
+            ),
+            "parakeet": (
+                os.environ.get("PARAKEET_GRPC_HOST", "parakeet-asr"),
+                int(os.environ.get("PARAKEET_GRPC_PORT", "50051")),
+            ),
+        }
+        if model not in host_port_by_model:
+            raise HTTPException(400, "model must be one of: whisper, parakeet")
+        grpc_host, grpc_port = host_port_by_model[model]
+
+        try:
+            from .transcribe import (
+                AudioPreprocess,
+                RIVA_AVAILABLE,
+                WhisperClient,
+                save_transcript,
+                stitch_transcript_boundary_with_previous,
+                refresh_result_from_saved_transcript,
+                export_timestamped_txt,
+                export_srt,
+            )
+        except ImportError as exc:
+            raise HTTPException(503, f"Transcription dependencies not available: {exc}")
+
+        if not RIVA_AVAILABLE:
+            raise HTTPException(
+                503,
+                "ASR client dependency missing in dashboard container (nvidia-riva-client)",
+            )
+
+        try:
+            preprocess_mode = AudioPreprocess(preprocess)
+        except ValueError:
+            valid = ", ".join(m.value for m in AudioPreprocess)
+            raise HTTPException(400, f"Invalid preprocess option '{preprocess}'. Valid: {valid}")
+
+        trans_cfg = getattr(config, "transcription", None)
+        segment_by_pauses = trans_cfg.segment_by_pauses if trans_cfg else False
+        min_silence_duration = trans_cfg.min_silence_duration if trans_cfg else 0.5
+        silence_threshold_dB = trans_cfg.silence_threshold_dB if trans_cfg else -30.0
+        min_speech_duration = trans_cfg.min_speech_duration if trans_cfg else 0.3
+        merge_gap_seconds = trans_cfg.merge_gap_seconds if trans_cfg else 0.5
+        output_format = trans_cfg.output_format if trans_cfg else "json"
+        diarization_enabled = trans_cfg.diarization_enabled if trans_cfg else False
+        diarization_mode = trans_cfg.diarization_mode if trans_cfg else "role-heuristic"
+        stitch_across_files = trans_cfg.stitch_across_files if trans_cfg else False
+        stitch_max_gap_seconds = trans_cfg.stitch_max_gap_seconds if trans_cfg else 2.0
+        stitch_min_text_overlap_chars = trans_cfg.stitch_min_text_overlap_chars if trans_cfg else 12
+
+        def _has_content(candidate) -> bool:
+            text = str(candidate.text or "").strip()
+            if text:
+                return True
+            for seg in candidate.segments or []:
+                seg_text = str(seg.get("text", "")).strip()
+                if seg_text and seg_text != "...":
+                    return True
+            return False
+
+        try:
+            client = WhisperClient(
+                grpc_host=grpc_host,
+                grpc_port=grpc_port,
+                language_code="en-US",
+            )
+            if not client.check_connection():
+                raise HTTPException(503, f"Cannot connect to ASR service at {grpc_host}:{grpc_port}")
+
+            attempts: list[tuple[bool, AudioPreprocess]] = [(segment_by_pauses, preprocess_mode)]
+            if segment_by_pauses:
+                attempts.append((False, preprocess_mode))
+            if preprocess_mode != AudioPreprocess.NONE:
+                attempts.append((False, AudioPreprocess.NONE))
+
+            deduped_attempts: list[tuple[bool, AudioPreprocess]] = []
+            for attempt in attempts:
+                if attempt not in deduped_attempts:
+                    deduped_attempts.append(attempt)
+
+            result = None
+            used_segment_by_pauses = segment_by_pauses
+            used_preprocess = preprocess_mode
+            for attempt_segment_by_pauses, attempt_preprocess in deduped_attempts:
+                candidate = client.convert_and_transcribe(
+                    audio_path=audio_path,
+                    preprocess=attempt_preprocess,
+                    segment_by_pauses=attempt_segment_by_pauses,
+                    min_silence_duration=min_silence_duration,
+                    silence_threshold_dB=silence_threshold_dB,
+                    min_speech_duration=min_speech_duration,
+                    merge_gap_seconds=merge_gap_seconds,
+                    diarization_enabled=diarization_enabled,
+                    diarization_mode=diarization_mode,
+                )
+                if candidate.success and _has_content(candidate):
+                    result = candidate
+                    used_segment_by_pauses = attempt_segment_by_pauses
+                    used_preprocess = attempt_preprocess
+                    break
+                result = candidate
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception("Dashboard ASR run failed")
+            raise HTTPException(500, f"ASR execution failed: {exc}")
+
+        if not result or not result.success:
+            raise HTTPException(500, f"ASR transcription failed: {result.error if result else 'unknown error'}")
+        if not _has_content(result):
+            raise HTTPException(
+                422,
+                "ASR returned no transcript content for this recording with the selected settings",
+            )
+
+        # Only persist when we have content.
+        save_transcript(result)
+        if result.transcript_file and stitch_across_files:
+            stitched = stitch_transcript_boundary_with_previous(
+                result.transcript_file,
+                max_gap_seconds=stitch_max_gap_seconds,
+                min_text_overlap_chars=stitch_min_text_overlap_chars,
+            )
+            if stitched:
+                refresh_result_from_saved_transcript(result)
+        if output_format == "timestamped-txt":
+            export_timestamped_txt(result)
+        elif output_format == "srt":
+            export_srt(result)
+
+        return {
+            "success": True,
+            "model": model,
+            "preprocess": used_preprocess.value,
+            "segment_by_pauses": used_segment_by_pauses,
+            "audio_file": filename,
+            "transcript_file": str(result.transcript_file) if result.transcript_file else None,
+            "segment_count": len(result.segments),
+            "text_preview": result.text[:200],
+        }
+
     # ── Semantic search (proxied) ───────────────────────────────────
     @app.post("/api/search")
     async def search(request: Request):
@@ -258,6 +521,8 @@ def create_app(config: Config) -> FastAPI:
                         "segment_index": h.segment_index,
                         "start_time_utc": h.start_time_utc.isoformat(),
                         "end_time_utc": h.end_time_utc.isoformat(),
+                        "start_offset_seconds": _audio_offset_seconds(recordings, h.audio_file, h.start_time_utc),
+                        "end_offset_seconds": _audio_offset_seconds(recordings, h.audio_file, h.end_time_utc),
                         "text": h.text,
                     }
                     for h in hits
@@ -379,6 +644,132 @@ def create_app(config: Config) -> FastAPI:
             points.append(point)
 
         return {"points": points, "count": len(points)}
+
+    # ── Entity search ──────────────────────────────────────────
+    def _get_metadata_store():
+        if config.rag and config.rag.vector_store:
+            db_path = Path(config.rag.vector_store.sqlite_metadata_path)
+        else:
+            db_path = recordings / "rag_metadata.db"
+        if not db_path.exists():
+            return None
+        from .ingest import MetadataStore
+        store = MetadataStore(db_path)
+        store.ensure_schema()
+        return store
+
+    @app.get("/api/entities/search")
+    async def search_entities(
+        q: str = Query(""),
+        entity_type: Optional[str] = Query(None),
+        feed_id: Optional[str] = Query(None),
+        start_time: Optional[str] = Query(None),
+        end_time: Optional[str] = Query(None),
+        limit: int = Query(100, ge=1, le=500),
+    ):
+        store = _get_metadata_store()
+        if not store:
+            raise HTTPException(503, "Metadata store not available")
+        results = store.search_entities(
+            normalized=q.upper() if q else None,
+            entity_type=entity_type,
+            feed_id=feed_id,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
+        )
+        return {"query": q, "results": results, "count": len(results)}
+
+    @app.get("/api/entities/active")
+    async def active_callsigns(
+        feed_id: Optional[str] = Query(None),
+        start_time: Optional[str] = Query(None),
+        end_time: Optional[str] = Query(None),
+        limit: int = Query(100, ge=1, le=500),
+    ):
+        store = _get_metadata_store()
+        if not store:
+            raise HTTPException(503, "Metadata store not available")
+        results = store.get_active_callsigns(
+            feed_id=feed_id, start_time=start_time, end_time=end_time, limit=limit,
+        )
+        return {"feed_id": feed_id, "callsigns": results, "count": len(results)}
+
+    # ── Flight tracking ────────────────────────────────────────
+    def _get_flight_tracker():
+        store = _get_metadata_store()
+        if not store:
+            return None
+        enrichment_svc = None
+        tracking = getattr(config, "tracking", None)
+        if tracking and tracking.opensky.enabled:
+            from .opensky import OpenSkyEnrichmentService
+            osky = tracking.opensky
+            enrichment_svc = OpenSkyEnrichmentService(
+                db_path=Path(tracking.enrichment_db_path),
+                credentials_file=Path(osky.credentials_file),
+                cache_ttl=osky.cache_ttl_seconds,
+                bbox={
+                    "lamin": osky.bbox_lamin, "lamax": osky.bbox_lamax,
+                    "lomin": osky.bbox_lomin, "lomax": osky.bbox_lomax,
+                },
+            )
+        from .flight_tracker import FlightTracker
+        return FlightTracker(metadata_store=store, enrichment_service=enrichment_svc)
+
+    @app.get("/api/flights/recent")
+    async def recent_flights(limit: int = Query(50, ge=1, le=200)):
+        store = _get_metadata_store()
+        if not store:
+            raise HTTPException(503, "Metadata store not available")
+        flights = store.get_recent_flights(limit=limit)
+        return {"flights": flights, "count": len(flights)}
+
+    @app.get("/api/flights/{callsign}")
+    async def get_flight_track(callsign: str):
+        tracker = _get_flight_tracker()
+        if not tracker:
+            raise HTTPException(503, "Metadata store not available")
+        from .flight_tracker import flight_track_to_dict
+        track = tracker.track_flight(callsign.upper())
+        if not track:
+            raise HTTPException(404, f"No data found for callsign {callsign}")
+        return flight_track_to_dict(track)
+
+    # ── Controller profiling ───────────────────────────────────
+    def _get_profiler():
+        if config.rag and config.rag.vector_store:
+            db_path = Path(config.rag.vector_store.sqlite_metadata_path)
+        else:
+            db_path = recordings / "rag_metadata.db"
+        if not db_path.exists():
+            return None
+        from .controller_profile import ControllerProfiler
+        return ControllerProfiler(db_path)
+
+    @app.get("/api/profile/{feed_id}")
+    async def get_position_profile(
+        feed_id: str,
+        start_time: Optional[str] = Query(None),
+        end_time: Optional[str] = Query(None),
+    ):
+        profiler = _get_profiler()
+        if not profiler:
+            raise HTTPException(503, "Metadata store not available")
+        from .controller_profile import profile_to_dict
+        profile = profiler.profile_feed(feed_id, start_time=start_time, end_time=end_time)
+        return profile_to_dict(profile)
+
+    @app.get("/api/profile/summary")
+    async def profile_summary(
+        start_time: Optional[str] = Query(None),
+        end_time: Optional[str] = Query(None),
+    ):
+        profiler = _get_profiler()
+        if not profiler:
+            raise HTTPException(503, "Metadata store not available")
+        summaries = profiler.summary_all_feeds(start_time=start_time, end_time=end_time)
+        return {"feeds": summaries, "count": len(summaries)}
 
     return app
 

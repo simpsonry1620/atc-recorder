@@ -39,19 +39,20 @@ recording:
 #   host: 0.0.0.0
 #   port: 8050
 
-# Optional: transcription defaults (for transcribe-watch and CLI)
-# transcription:
-#   segment_by_pauses: true    # segment by silence and timestamp each segment
-#   min_silence_duration: 0.5  # seconds of silence to detect a pause
-#   silence_threshold_dB: -30  # dB below which is considered silence
-#   min_speech_duration: 0.3   # drop speech intervals shorter than this
-#   merge_gap_seconds: 0.5     # merge speech intervals separated by shorter silence
-#   output_format: json        # json | timestamped-txt | srt
-#   diarization_enabled: false # add role labels: ATC | PILOT | UNKNOWN
-#   diarization_mode: role-heuristic
-#   stitch_across_files: false # stitch transmissions spanning adjacent files
-#   stitch_max_gap_seconds: 2.0
-#   stitch_min_text_overlap_chars: 12
+# Transcription defaults (used by transcribe-watch and CLI commands)
+transcription:
+  preprocess: ffmpeg_vad      # none | ffmpeg | ffmpeg_vad | sox
+  segment_by_pauses: true     # segment by silence and timestamp each segment
+  min_silence_duration: 0.5   # seconds of silence to detect a pause
+  silence_threshold_dB: -30   # dB below which is considered silence
+  min_speech_duration: 0.3    # drop speech intervals shorter than this
+  merge_gap_seconds: 0.5      # merge speech intervals separated by shorter silence
+  output_format: json         # json | timestamped-txt | srt
+  diarization_enabled: false  # add role labels: ATC | PILOT | UNKNOWN
+  diarization_mode: role-heuristic
+  stitch_across_files: false  # stitch transmissions spanning adjacent files
+  stitch_max_gap_seconds: 2.0
+  stitch_min_text_overlap_chars: 12
 
 # RAG ingestion and semantic search configuration
 rag:
@@ -79,3 +80,15 @@ rag:
     port: 8100
     top_k_default: 10
     top_k_max: 50
+
+# Flight tracking and entity extraction
+tracking:
+  opensky:
+    enabled: true
+    credentials_file: ./credentials.json
+    cache_ttl_seconds: 3600
+    # Bounding box ~50nm around DCA
+    bbox_lamin: 38.0
+    bbox_lamax: 39.7
+    bbox_lomin: -77.9
+    bbox_lomax: -76.2

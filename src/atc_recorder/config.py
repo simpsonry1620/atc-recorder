@@ -20,7 +20,8 @@ class RecordingConfig:
 @dataclass
 class TranscriptionConfig:
     """Configuration for transcription (segment-by-pauses, export format)."""
-    
+
+    preprocess: str = "none"  # none, ffmpeg, ffmpeg_vad, sox
     segment_by_pauses: bool = False
     min_silence_duration: float = 0.5
     silence_threshold_dB: float = -30.0
@@ -84,6 +85,41 @@ class RagConfig:
 
 
 @dataclass
+class EntityExtractionConfig:
+    """Entity extraction configuration."""
+
+    enabled: bool = True
+    extract_callsigns: bool = True
+    extract_runways: bool = True
+    extract_altitudes: bool = True
+    extract_frequencies: bool = True
+    min_confidence: float = 0.5
+
+
+@dataclass
+class OpenSkyConfig:
+    """OpenSky Network integration configuration."""
+
+    enabled: bool = False
+    credentials_file: str = "./credentials.json"
+    cache_ttl_seconds: int = 3600
+    max_requests_per_day: int = 100
+    bbox_lamin: float = 38.0
+    bbox_lamax: float = 39.7
+    bbox_lomin: float = -77.9
+    bbox_lomax: float = -76.2
+
+
+@dataclass
+class TrackingConfig:
+    """Flight tracking and entity extraction configuration."""
+
+    entity_extraction: EntityExtractionConfig = field(default_factory=EntityExtractionConfig)
+    opensky: OpenSkyConfig = field(default_factory=OpenSkyConfig)
+    enrichment_db_path: str = "./recordings/flight_enrichment.db"
+
+
+@dataclass
 class Config:
     """Main configuration for ATC Recorder."""
     
@@ -93,6 +129,7 @@ class Config:
     recording: RecordingConfig = field(default_factory=RecordingConfig)
     transcription: Optional[TranscriptionConfig] = None
     rag: Optional[RagConfig] = None
+    tracking: Optional[TrackingConfig] = None
     request_delay: float = 1.0  # delay between requests in seconds
     user_agent: str = "ATC-Recorder/0.1.0"
     
@@ -137,6 +174,7 @@ class Config:
         if 'transcription' in data:
             t = data['transcription']
             transcription_config = TranscriptionConfig(
+                preprocess=t.get('preprocess', 'none'),
                 segment_by_pauses=t.get('segment_by_pauses', False),
                 min_silence_duration=t.get('min_silence_duration', 0.5),
                 silence_threshold_dB=t.get('silence_threshold_dB', -30.0),
@@ -191,6 +229,33 @@ class Config:
                 ),
             )
         
+        tracking_config = None
+        if "tracking" in data:
+            tk = data["tracking"]
+            ee = tk.get("entity_extraction", {})
+            os_data = tk.get("opensky", {})
+            tracking_config = TrackingConfig(
+                entity_extraction=EntityExtractionConfig(
+                    enabled=ee.get("enabled", True),
+                    extract_callsigns=ee.get("extract_callsigns", True),
+                    extract_runways=ee.get("extract_runways", True),
+                    extract_altitudes=ee.get("extract_altitudes", True),
+                    extract_frequencies=ee.get("extract_frequencies", True),
+                    min_confidence=ee.get("min_confidence", 0.5),
+                ),
+                opensky=OpenSkyConfig(
+                    enabled=os_data.get("enabled", False),
+                    credentials_file=os_data.get("credentials_file", "./credentials.json"),
+                    cache_ttl_seconds=os_data.get("cache_ttl_seconds", 3600),
+                    max_requests_per_day=os_data.get("max_requests_per_day", 100),
+                    bbox_lamin=float(os_data.get("bbox_lamin", 38.0)),
+                    bbox_lamax=float(os_data.get("bbox_lamax", 39.7)),
+                    bbox_lomin=float(os_data.get("bbox_lomin", -77.9)),
+                    bbox_lomax=float(os_data.get("bbox_lomax", -76.2)),
+                ),
+                enrichment_db_path=tk.get("enrichment_db_path", "./recordings/flight_enrichment.db"),
+            )
+
         output_dir = data.get('output_dir', './recordings')
         if isinstance(output_dir, str):
             output_dir = Path(output_dir)
@@ -202,6 +267,7 @@ class Config:
             recording=recording_config,
             transcription=transcription_config,
             rag=rag_config,
+            tracking=tracking_config,
             request_delay=data.get('request_delay', 1.0),
             user_agent=data.get('user_agent', 'ATC-Recorder/0.1.0'),
         )
@@ -227,6 +293,7 @@ class Config:
         }
         if self.transcription is not None:
             d['transcription'] = {
+                'preprocess': self.transcription.preprocess,
                 'segment_by_pauses': self.transcription.segment_by_pauses,
                 'min_silence_duration': self.transcription.min_silence_duration,
                 'silence_threshold_dB': self.transcription.silence_threshold_dB,
@@ -269,6 +336,28 @@ class Config:
                     "top_k_default": self.rag.api.top_k_default,
                     "top_k_max": self.rag.api.top_k_max,
                 },
+            }
+        if self.tracking is not None:
+            d["tracking"] = {
+                "entity_extraction": {
+                    "enabled": self.tracking.entity_extraction.enabled,
+                    "extract_callsigns": self.tracking.entity_extraction.extract_callsigns,
+                    "extract_runways": self.tracking.entity_extraction.extract_runways,
+                    "extract_altitudes": self.tracking.entity_extraction.extract_altitudes,
+                    "extract_frequencies": self.tracking.entity_extraction.extract_frequencies,
+                    "min_confidence": self.tracking.entity_extraction.min_confidence,
+                },
+                "opensky": {
+                    "enabled": self.tracking.opensky.enabled,
+                    "credentials_file": self.tracking.opensky.credentials_file,
+                    "cache_ttl_seconds": self.tracking.opensky.cache_ttl_seconds,
+                    "max_requests_per_day": self.tracking.opensky.max_requests_per_day,
+                    "bbox_lamin": self.tracking.opensky.bbox_lamin,
+                    "bbox_lamax": self.tracking.opensky.bbox_lamax,
+                    "bbox_lomin": self.tracking.opensky.bbox_lomin,
+                    "bbox_lomax": self.tracking.opensky.bbox_lomax,
+                },
+                "enrichment_db_path": self.tracking.enrichment_db_path,
             }
         return d
     

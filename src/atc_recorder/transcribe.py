@@ -1062,6 +1062,32 @@ class WhisperClient:
                 if slice_path.exists():
                     slice_path.unlink()
 
+        visible_segments = [
+            s for s in all_segments
+            if _clean_text(s.get("text", "")) and _clean_text(s.get("text", "")) != "..."
+        ]
+        if not visible_segments:
+            # Some ASR backends can return empty strings on short VAD slices.
+            # Fall back to whole-file/chunked transcription so we still return usable text.
+            logger.warning(
+                "Pause-segmented transcription produced no text for %s; "
+                "falling back to whole-audio transcription",
+                original_path.name,
+            )
+            max_chunk_size = 3 * 1024 * 1024
+            wav_size = wav_path.stat().st_size
+            if wav_size <= max_chunk_size:
+                fallback = self.transcribe_file(wav_path)
+                fallback.audio_file = original_path
+            else:
+                fallback = self._transcribe_chunked(wav_path, original_path)
+            apply_role_diarization(
+                fallback.segments,
+                enabled=diarization_enabled,
+                mode=diarization_mode,
+            )
+            return fallback
+
         return TranscriptionResult(
             success=True,
             audio_file=original_path,
@@ -1386,6 +1412,7 @@ class TranscriptionWatcher:
         client: WhisperClient,
         on_transcription: Optional[Callable[[TranscriptionResult], None]] = None,
         file_patterns: list[str] = None,
+        preprocess: AudioPreprocess = AudioPreprocess.NONE,
         segment_by_pauses: bool = False,
         min_silence_duration: float = 0.5,
         silence_threshold_dB: float = -30.0,
@@ -1406,6 +1433,7 @@ class TranscriptionWatcher:
             client: WhisperClient for transcription
             on_transcription: Optional callback when transcription completes
             file_patterns: File extensions to watch (default: ['.mp3'])
+            preprocess: Audio preprocessing method to apply before ASR
             segment_by_pauses: If True, segment by silence and timestamp each segment
             min_silence_duration: Min silence duration (s) for pause detection
             silence_threshold_dB: dB level for silence detection
@@ -1423,6 +1451,7 @@ class TranscriptionWatcher:
         self.client = client
         self.on_transcription = on_transcription
         self.file_patterns = file_patterns or ['.mp3']
+        self._preprocess = preprocess
         self._segment_by_pauses = segment_by_pauses
         self._min_silence_duration = min_silence_duration
         self._silence_threshold_dB = silence_threshold_dB
@@ -1478,6 +1507,7 @@ class TranscriptionWatcher:
         try:
             result = self.client.convert_and_transcribe(
                 path,
+                preprocess=self._preprocess,
                 segment_by_pauses=self._segment_by_pauses,
                 min_silence_duration=self._min_silence_duration,
                 silence_threshold_dB=self._silence_threshold_dB,
@@ -1659,6 +1689,7 @@ def watch_and_transcribe(
     grpc_host: str = None,
     grpc_port: int = None,
     language_code: str = "en-US",
+    preprocess: AudioPreprocess = AudioPreprocess.NONE,
     segment_by_pauses: bool = False,
     min_silence_duration: float = 0.5,
     silence_threshold_dB: float = -30.0,
@@ -1679,6 +1710,7 @@ def watch_and_transcribe(
         grpc_host: Whisper gRPC host (default from env WHISPER_GRPC_HOST)
         grpc_port: Whisper gRPC port (default from env WHISPER_GRPC_PORT)
         language_code: Language code for transcription
+        preprocess: Audio preprocessing method to apply before ASR
         segment_by_pauses: If True, segment by silence and timestamp each segment
         min_silence_duration: Min silence duration (s) for pause detection
         silence_threshold_dB: dB level for silence detection
@@ -1707,6 +1739,7 @@ def watch_and_transcribe(
     watcher = TranscriptionWatcher(
         watch_dir=watch_dir,
         client=client,
+        preprocess=preprocess,
         segment_by_pauses=segment_by_pauses,
         min_silence_duration=min_silence_duration,
         silence_threshold_dB=silence_threshold_dB,
@@ -1781,6 +1814,7 @@ def transcribe_all(
     language_code: str = "en-US",
     on_progress: callable = None,
     force: bool = False,
+    preprocess: AudioPreprocess = AudioPreprocess.NONE,
     segment_by_pauses: bool = False,
     min_silence_duration: float = 0.5,
     silence_threshold_dB: float = -30.0,
@@ -1805,6 +1839,7 @@ def transcribe_all(
         language_code: Language code for transcription
         on_progress: Optional callback(current, total, result) for progress updates
         force: If True, transcribe all audio files (including those with existing transcripts)
+        preprocess: Audio preprocessing method to apply before ASR
         segment_by_pauses: If True, segment by silence and timestamp each segment
         min_silence_duration: Min silence duration (s) for pause detection
         silence_threshold_dB: dB level for silence detection
@@ -1853,6 +1888,7 @@ def transcribe_all(
         try:
             result = client.convert_and_transcribe(
                 audio_file,
+                preprocess=preprocess,
                 segment_by_pauses=segment_by_pauses,
                 min_silence_duration=min_silence_duration,
                 silence_threshold_dB=silence_threshold_dB,
