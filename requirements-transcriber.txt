@@ -2,3 +2,7 @@
 nvidia-riva-client>=2.14.0
 watchdog>=3.0.0
 grpcio>=1.60.0
+
+# Optional Maxine preprocessing support:
+# Install NVIDIA Maxine Audio Effects SDK/runtime separately and expose a wrapper
+# command via MAXINE_AUDIO_CMD_TEMPLATE or MAXINE_AUDIO_CLI.

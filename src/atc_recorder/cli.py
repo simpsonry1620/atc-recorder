@@ -603,7 +603,7 @@ def check(quiet: bool, strict: bool) -> None:
               help='Only check connection to Whisper service')
 @click.option('--no-save', is_flag=True,
               help='Do not save transcript to file')
-@click.option('--preprocess', type=click.Choice(['none', 'ffmpeg', 'ffmpeg_vad', 'sox']), default=None,
+@click.option('--preprocess', type=click.Choice(['none', 'ffmpeg', 'ffmpeg_vad', 'sox', 'maxine']), default=None,
               help='Audio preprocessing mode (default: from config, fallback none)')
 @click.option('--segment-by-pauses', is_flag=True,
               help='Segment by silence and timestamp each segment')
@@ -672,11 +672,15 @@ def transcribe(
     trans_cfg = getattr(cfg, "transcription", None)
     preprocess_value = preprocess if preprocess is not None else (trans_cfg.preprocess if trans_cfg else "none")
     preprocess_mode = _resolve_preprocess(preprocess_value)
+    preprocess_output_dir = Path(trans_cfg.preprocess_output_dir) if trans_cfg else None
+    keep_preprocessed_audio = bool(trans_cfg.keep_preprocessed_audio) if trans_cfg else False
     
     console.print(f"[bold]Transcribing: {audio_file}[/bold]")
     console.print(f"  Service: {host}:{port}")
     console.print(f"  Language: {language}")
     console.print(f"  Preprocess: {preprocess_mode.value}")
+    if keep_preprocessed_audio:
+        console.print(f"  Preprocess artifacts: {preprocess_output_dir}")
     console.print()
     
     with console.status("[bold blue]Transcribing..."):
@@ -687,6 +691,8 @@ def transcribe(
             language_code=language,
             save=not no_save,
             preprocess=preprocess_mode,
+            preprocess_output_dir=preprocess_output_dir,
+            keep_preprocessed_audio=keep_preprocessed_audio,
             segment_by_pauses=segment_by_pauses,
             min_silence_duration=min_silence_duration,
             silence_threshold_dB=silence_db,
@@ -698,6 +704,11 @@ def transcribe(
     
     if result.success:
         console.print("[green]✓ Transcription complete[/green]")
+        if result.preprocess_applied != preprocess_mode.value:
+            console.print(
+                f"[yellow]![/yellow] Preprocess fallback: requested={preprocess_mode.value}, "
+                f"applied={result.preprocess_applied}, chain={result.preprocess_fallback_chain}"
+            )
         console.print()
         console.print("[bold]Transcript:[/bold]")
         console.print(result.text)
@@ -727,7 +738,7 @@ def transcribe(
               help='Whisper gRPC port (env: WHISPER_GRPC_PORT)')
 @click.option('--language', '-l', default='en-US',
               help='Language code (BCP-47 format)')
-@click.option('--preprocess', type=click.Choice(['none', 'ffmpeg', 'ffmpeg_vad', 'sox']), default=None,
+@click.option('--preprocess', type=click.Choice(['none', 'ffmpeg', 'ffmpeg_vad', 'sox', 'maxine']), default=None,
               help='Audio preprocessing mode (default: from config, fallback none)')
 @click.pass_context
 def transcribe_watch(
@@ -777,12 +788,16 @@ def transcribe_watch(
     stitch_across_files = trans.stitch_across_files if trans else False
     stitch_max_gap_seconds = trans.stitch_max_gap_seconds if trans else 2.0
     stitch_min_text_overlap_chars = trans.stitch_min_text_overlap_chars if trans else 12
+    preprocess_output_dir = Path(trans.preprocess_output_dir) if trans else None
+    keep_preprocessed_audio = bool(trans.keep_preprocessed_audio) if trans else False
 
     console.print("[bold]ATC Transcription Watcher[/bold]")
     console.print(f"  Watch directory: {watch_dir}")
     console.print(f"  Whisper service: {host}:{port}")
     console.print(f"  Language: {language}")
     console.print(f"  Preprocess: {preprocess_mode.value}")
+    if keep_preprocessed_audio:
+        console.print(f"  Preprocess artifacts: {preprocess_output_dir}")
     if segment_by_pauses:
         console.print(f"  Segment by pauses: yes (min_silence={min_silence_duration}s)")
     console.print(f"  Role diarization: {'enabled' if diarization_enabled else 'disabled'}")
@@ -802,6 +817,8 @@ def transcribe_watch(
             grpc_port=port,
             language_code=language,
             preprocess=preprocess_mode,
+            preprocess_output_dir=preprocess_output_dir,
+            keep_preprocessed_audio=keep_preprocessed_audio,
             segment_by_pauses=segment_by_pauses,
             min_silence_duration=min_silence_duration,
             silence_threshold_dB=silence_db,
@@ -834,7 +851,7 @@ def transcribe_watch(
               help='Language code (BCP-47 format)')
 @click.option('--force', '-f', is_flag=True,
               help='Re-transcribe all audio files (overwrite existing transcripts)')
-@click.option('--preprocess', type=click.Choice(['none', 'ffmpeg', 'ffmpeg_vad', 'sox']), default=None,
+@click.option('--preprocess', type=click.Choice(['none', 'ffmpeg', 'ffmpeg_vad', 'sox', 'maxine']), default=None,
               help='Audio preprocessing mode (default: from config, fallback none)')
 @click.option('--segment-by-pauses', is_flag=True,
               help='Segment by silence and timestamp each segment')
@@ -887,6 +904,8 @@ def transcribe_all(
     stitch_enabled = stitch_across_files or (trans.stitch_across_files if trans else False)
     stitch_max_gap_seconds = trans.stitch_max_gap_seconds if trans else 2.0
     stitch_min_text_overlap_chars = trans.stitch_min_text_overlap_chars if trans else 12
+    preprocess_output_dir = Path(trans.preprocess_output_dir) if trans else None
+    keep_preprocessed_audio = bool(trans.keep_preprocessed_audio) if trans else False
     
     # Find files to transcribe
     with console.status("[bold blue]Scanning for files..."):
@@ -912,6 +931,8 @@ def transcribe_all(
     console.print(f"  Whisper service: {host}:{port}")
     console.print(f"  Language: {language}")
     console.print(f"  Preprocess: {preprocess_mode.value}")
+    if keep_preprocessed_audio:
+        console.print(f"  Preprocess artifacts: {preprocess_output_dir}")
     if segment_by_pauses:
         console.print("  Segment by pauses: yes")
     console.print(f"  Role diarization: {'enabled' if diarization_enabled else 'disabled'}")
@@ -951,6 +972,9 @@ def transcribe_all(
                 result = client.convert_and_transcribe(
                     audio_file,
                     preprocess=preprocess_mode,
+                    preprocess_output_dir=preprocess_output_dir,
+                    keep_preprocessed_audio=keep_preprocessed_audio,
+                    recordings_root=recordings_dir,
                     segment_by_pauses=segment_by_pauses,
                     diarization_enabled=diarization_enabled,
                     diarization_mode=diarization_mode,
@@ -967,7 +991,7 @@ def transcribe_all(
                     save_transcript(
                         result,
                         asr_model=model_name_batch,
-                        preprocess=preprocess_mode.value,
+                        preprocess=result.preprocess_applied,
                         variant_store=vs_batch,
                         recordings_root=recordings_dir,
                     )
@@ -983,6 +1007,11 @@ def transcribe_all(
                         export_timestamped_txt(result)
                     elif output_format == "srt":
                         export_srt(result)
+                    if result.preprocess_applied != preprocess_mode.value:
+                        progress.console.print(
+                            f"  [yellow]![/yellow] {audio_file.name}: preprocess fallback "
+                            f"{preprocess_mode.value} -> {result.preprocess_applied}"
+                        )
                     progress.console.print(f"  [green]✓[/green] {audio_file.name}")
                     success_count += 1
                 else:
@@ -1386,186 +1415,6 @@ def extract_entities_cmd(
 
     if errors > 0:
         sys.exit(1)
-
-
-@cli.command("enrich-flights")
-@click.option('--config', '-c', type=click.Path(exists=True, path_type=Path),
-              help='Path to configuration file')
-@click.option('--limit', '-n', default=50, type=int,
-              help='Max callsigns to enrich')
-@click.option('--historical', is_flag=True, default=False,
-              help='Use historical airport arrival/departure data instead of live state vectors')
-@click.option('--airport', default='KDCA',
-              help='ICAO airport code for historical lookups (default: KDCA)')
-@click.pass_context
-def enrich_flights_cmd(
-    ctx: click.Context,
-    config: Optional[Path],
-    limit: int,
-    historical: bool,
-    airport: str,
-) -> None:
-    """Batch-enrich extracted callsigns via OpenSky Network.
-
-    By default, looks up callsigns against live state vectors in the
-    configured bounding box. Use --historical to match against airport
-    arrival/departure records for the time range of your recordings.
-    """
-    cfg = load_config(config) if config else ctx.obj['config']
-    tracking = getattr(cfg, "tracking", None)
-
-    if cfg.rag and cfg.rag.vector_store:
-        db_path = Path(cfg.rag.vector_store.sqlite_metadata_path)
-    else:
-        db_path = cfg.output_dir / "rag_metadata.db"
-
-    if not db_path.exists():
-        console.print("[red]Error: metadata database not found. Run entity extraction first.[/red]")
-        sys.exit(1)
-
-    from .ingest import MetadataStore
-    store = MetadataStore(db_path)
-    store.ensure_schema()
-
-    enrichment_db = Path(tracking.enrichment_db_path) if tracking else cfg.output_dir / "flight_enrichment.db"
-    osky = tracking.opensky if tracking else None
-    cache_ttl = osky.cache_ttl_seconds if osky else 3600
-    creds_file = Path(osky.credentials_file) if osky else Path("./credentials.json")
-    bbox = {
-        "lamin": osky.bbox_lamin, "lamax": osky.bbox_lamax,
-        "lomin": osky.bbox_lomin, "lomax": osky.bbox_lomax,
-    } if osky else None
-
-    from .opensky import OpenSkyEnrichmentService
-    service = OpenSkyEnrichmentService(
-        db_path=enrichment_db, credentials_file=creds_file,
-        cache_ttl=cache_ttl, bbox=bbox,
-    )
-    has_creds = creds_file.exists()
-
-    recent = store.get_recent_flights(limit=limit)
-    callsigns = [r["normalized"] for r in recent]
-    feeds_map = {r["normalized"]: (r.get("feeds") or "").split(",") for r in recent}
-
-    console.print("[bold]OpenSky Flight Enrichment[/bold]")
-    console.print(f"  Callsigns to enrich: {len(callsigns)}")
-    console.print(f"  Enrichment DB: {enrichment_db}")
-    console.print(f"  Mode: {'historical (' + airport + ')' if historical else 'live (bounding box)'}")
-    if has_creds:
-        console.print(f"  [green]✓ Credentials loaded from {creds_file}[/green]")
-    else:
-        console.print(f"  [yellow]⚠ No credentials file found at {creds_file}[/yellow]")
-        console.print("    Download credentials.json from your OpenSky account page.")
-    console.print()
-
-    if historical:
-        if not has_creds:
-            console.print("[red]Error: historical mode requires OpenSky credentials.[/red]")
-            sys.exit(1)
-        _enrich_historical(store, service, callsigns, feeds_map, airport)
-    else:
-        _enrich_live(service, callsigns, feeds_map)
-
-
-def _enrich_live(service, callsigns, feeds_map):
-    """Enrich callsigns using live bounding-box state vectors."""
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TaskProgressColumn(),
-        console=console,
-    ) as progress:
-        task = progress.add_task("Enriching...", total=len(callsigns))
-        enriched = 0
-        not_found = 0
-
-        for cs in callsigns:
-            progress.update(task, description=f"Enriching {cs}...")
-            result = service.enrich(cs, feeds_heard=feeds_map.get(cs, []))
-            if result and result.icao24:
-                enriched += 1
-                route = ""
-                if result.origin or result.destination:
-                    route = f" {result.origin or '?'} → {result.destination or '?'}"
-                progress.console.print(
-                    f"  [green]✓[/green] {cs}: {result.icao24}{route}"
-                )
-            else:
-                not_found += 1
-            progress.advance(task)
-
-    console.print()
-    console.print("[green]✓ Enrichment complete[/green]")
-    console.print(f"  Matched in airspace: {enriched}")
-    if not_found:
-        console.print(f"  Not currently visible: {not_found}")
-
-
-def _enrich_historical(store, service, callsigns, feeds_map, airport):
-    """Enrich callsigns using historical airport arrival/departure data."""
-    import sqlite3
-    conn = sqlite3.connect(store.db_path)
-    conn.row_factory = sqlite3.Row
-    row = conn.execute(
-        """SELECT MIN(td.start_time_utc) as earliest, MAX(td.end_time_utc) as latest
-           FROM entity_mentions em
-           JOIN transcript_docs td ON em.doc_id = td.doc_id
-           WHERE em.entity_type = 'callsign'"""
-    ).fetchone()
-    conn.close()
-
-    if not row or not row["earliest"] or not row["latest"]:
-        console.print("[red]Error: no timestamped callsign data found.[/red]")
-        return
-
-    from datetime import datetime, timezone
-    earliest = datetime.fromisoformat(row["earliest"]).astimezone(timezone.utc)
-    latest = datetime.fromisoformat(row["latest"]).astimezone(timezone.utc)
-    begin = int(earliest.timestamp()) - 3600
-    end = int(latest.timestamp()) + 3600
-
-    total_days = max(1, (end - begin) // 86400)
-    console.print(f"  Recording window: {earliest:%Y-%m-%d %H:%M} → {latest:%Y-%m-%d %H:%M} UTC")
-    console.print(f"  Fetching {airport} arrivals & departures ({total_days} days)...")
-    console.print()
-
-    airport_flights = service.client.get_airport_flights(airport, begin, end)
-    console.print(f"  [green]✓[/green] Found {len(airport_flights)} unique flights at {airport}")
-    console.print()
-
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TaskProgressColumn(),
-        console=console,
-    ) as progress:
-        task = progress.add_task("Matching callsigns...", total=len(callsigns))
-
-        def on_progress(cs, flight):
-            if flight:
-                origin = flight.get("estDepartureAirport") or "?"
-                dest = flight.get("estArrivalAirport") or "?"
-                icao24 = flight.get("icao24", "")
-                progress.console.print(
-                    f"  [green]✓[/green] {cs}: {icao24} {origin} → {dest}"
-                )
-            progress.advance(task)
-
-        stats = service.historical_enrich(
-            callsigns=callsigns,
-            feeds_map=feeds_map,
-            airport_flights=airport_flights,
-            on_progress=on_progress,
-        )
-
-    console.print()
-    console.print("[green]✓ Historical enrichment complete[/green]")
-    console.print(f"  Flights from {airport} API: {stats['api_flights']}")
-    console.print(f"  Callsigns matched: {stats['matched']}")
-    if stats["not_found"]:
-        console.print(f"  Not found in {airport} data: {stats['not_found']}")
 
 
 @cli.command("flight-track")

@@ -625,17 +625,6 @@ function renderFlightTrack(data) {
   let infoHtml = `<div class="flex items-center gap-4 flex-wrap">
     <span class="text-2xl font-bold text-white">${esc(data.callsign)}</span>
     <span class="text-sm text-gray-400">${data.feed_count} frequencies &middot; ${Math.round(data.total_duration_seconds / 60)} min tracked</span>`;
-
-  if (data.enrichment) {
-    const e = data.enrichment;
-    const parts = [];
-    if (e.aircraft_type) parts.push(e.aircraft_type);
-    if (e.registration) parts.push(e.registration);
-    if (e.origin && e.destination) parts.push(`${e.origin} → ${e.destination}`);
-    else if (e.origin) parts.push(`from ${e.origin}`);
-    else if (e.destination) parts.push(`to ${e.destination}`);
-    if (parts.length) infoHtml += `<span class="text-sm text-brand-400">${esc(parts.join(' · '))}</span>`;
-  }
   infoHtml += `</div>`;
   infoEl.innerHTML = infoHtml;
 
@@ -856,9 +845,455 @@ async function loadProfileSummary() {
   }
 }
 
+// ──────────────── AUDIO LAB ────────────────────────────
+const labFeed = document.getElementById('lab-feed');
+const labDate = document.getElementById('lab-date');
+const labFile = document.getElementById('lab-file');
+const labRunBtn = document.getElementById('lab-run');
+const labStatus = document.getElementById('lab-status');
+const labMethodsEl = document.getElementById('lab-methods');
+const labResultsEl = document.getElementById('lab-results');
+let labAllMethods = [];
+let labAvailableMethods = [];
+let labParamSchema = {};
+
+const PARAM_LABELS = {
+  highpass_freq: 'Highpass (Hz)',
+  lowpass_freq: 'Lowpass (Hz)',
+  noise_floor_db: 'Noise Floor (dB)',
+  dynaudnorm_peak: 'Norm Peak',
+  dynaudnorm_smoothing: 'Norm Smoothing (s)',
+  silence_stop_duration: 'Min Silence (s)',
+  silence_threshold_db: 'Silence Threshold (dB)',
+  leave_silence: 'Leave Silence (s)',
+  noise_sample_duration: 'Noise Sample (s)',
+  noise_reduction: 'Noise Reduction',
+  intensity_ratio: 'Intensity',
+  effect_version: 'Model Version',
+  enable_vad: 'Built-in VAD',
+  effect: 'Effect',
+};
+
+const PARAM_STEP = {
+  highpass_freq: 10,
+  lowpass_freq: 100,
+  noise_floor_db: 1,
+  dynaudnorm_peak: 0.05,
+  dynaudnorm_smoothing: 1,
+  silence_stop_duration: 0.05,
+  silence_threshold_db: 1,
+  leave_silence: 0.05,
+  noise_sample_duration: 0.1,
+  noise_reduction: 0.01,
+  intensity_ratio: 0.05,
+  effect_version: 1,
+  enable_vad: 1,
+};
+
+async function loadLabStatus() {
+  try {
+    const [statusData, paramsData] = await Promise.all([
+      api('/api/preprocess/status'),
+      api('/api/preprocess/params'),
+    ]);
+    labAllMethods = statusData.all_methods || [];
+    labAvailableMethods = statusData.available_methods || [];
+    labParamSchema = paramsData.params || {};
+    renderLabMethodCheckboxes();
+    renderLabParamControls();
+  } catch (e) { console.error('Lab status load failed', e); }
+}
+
+function renderLabMethodCheckboxes() {
+  labMethodsEl.innerHTML = labAllMethods.map(m => {
+    const available = labAvailableMethods.includes(m);
+    const checked = available && m !== 'none' ? 'checked' : '';
+    const disabled = available ? '' : 'disabled';
+    const opacity = available ? '' : 'opacity-50';
+    const badge = available ? '' : '<span class="text-xs text-yellow-500 ml-1">(unavailable)</span>';
+    return `
+      <label class="lab-method-card ${opacity}">
+        <input type="checkbox" name="lab-method" value="${m}" ${checked} ${disabled} />
+        <span class="text-sm font-medium text-gray-200">${esc(m)}</span>${badge}
+      </label>`;
+  }).join('');
+
+  labMethodsEl.querySelectorAll('input[name="lab-method"]').forEach(cb => {
+    cb.addEventListener('change', updateLabParamVisibility);
+  });
+}
+
+function renderLabParamControls() {
+  const container = document.getElementById('lab-params-controls');
+  if (!Object.keys(labParamSchema).length) {
+    container.innerHTML = '<p class="text-gray-500 text-sm">No tunable parameters available.</p>';
+    return;
+  }
+
+  let html = '';
+  for (const [method, params] of Object.entries(labParamSchema)) {
+    const paramRows = Object.entries(params).map(([key, spec]) => {
+      const label = PARAM_LABELS[key] || key;
+
+      if (spec.options) {
+        const opts = spec.options.map(o =>
+          `<option value="${esc(o)}" ${o === spec.default ? 'selected' : ''}>${esc(o)}</option>`
+        ).join('');
+        return `
+          <div class="lab-param-row lab-param-row-select">
+            <label class="lab-param-label" for="lab-p-${method}-${key}">${esc(label)}</label>
+            <select id="lab-p-${method}-${key}"
+              class="lab-param-select" data-method="${method}" data-param="${key}">
+              ${opts}
+            </select>
+            <span class="lab-param-default text-xs text-gray-600">(${esc(String(spec.default))})</span>
+          </div>`;
+      }
+
+      if (spec.min === 0 && spec.max === 1 && spec.type === 'int') {
+        const checked = spec.default ? 'checked' : '';
+        return `
+          <div class="lab-param-row lab-param-row-toggle">
+            <label class="lab-param-label" for="lab-p-${method}-${key}">${esc(label)}</label>
+            <label class="lab-toggle">
+              <input type="checkbox" id="lab-p-${method}-${key}"
+                class="lab-param-toggle" data-method="${method}" data-param="${key}" ${checked} />
+              <span class="lab-toggle-track"><span class="lab-toggle-thumb"></span></span>
+            </label>
+            <span class="lab-param-default text-xs text-gray-600">(${spec.default ? 'on' : 'off'})</span>
+          </div>`;
+      }
+
+      const step = PARAM_STEP[key] || (spec.type === 'float' ? 0.01 : 1);
+      return `
+        <div class="lab-param-row">
+          <label class="lab-param-label" for="lab-p-${method}-${key}">${esc(label)}</label>
+          <input type="range" id="lab-r-${method}-${key}"
+            class="lab-param-range" data-method="${method}" data-param="${key}"
+            min="${spec.min}" max="${spec.max}" step="${step}" value="${spec.default}" />
+          <input type="number" id="lab-p-${method}-${key}"
+            class="lab-param-input" data-method="${method}" data-param="${key}"
+            min="${spec.min}" max="${spec.max}" step="${step}" value="${spec.default}" />
+          <span class="lab-param-default text-xs text-gray-600">(${spec.default})</span>
+        </div>`;
+    }).join('');
+
+    html += `
+      <div class="lab-param-group" data-method="${method}">
+        <h4 class="lab-param-method-title">${esc(method)}</h4>
+        ${paramRows}
+      </div>`;
+  }
+  container.innerHTML = html;
+
+  container.querySelectorAll('.lab-param-range').forEach(range => {
+    range.addEventListener('input', () => {
+      const numInput = document.getElementById(`lab-p-${range.dataset.method}-${range.dataset.param}`);
+      numInput.value = range.value;
+      updateParamBadge();
+    });
+  });
+  container.querySelectorAll('.lab-param-input').forEach(input => {
+    input.addEventListener('input', () => {
+      const rangeInput = document.getElementById(`lab-r-${input.dataset.method}-${input.dataset.param}`);
+      rangeInput.value = input.value;
+      updateParamBadge();
+    });
+  });
+  container.querySelectorAll('.lab-param-select').forEach(sel => {
+    sel.addEventListener('change', updateParamBadge);
+  });
+  container.querySelectorAll('.lab-param-toggle').forEach(tog => {
+    tog.addEventListener('change', updateParamBadge);
+  });
+
+  updateLabParamVisibility();
+}
+
+function updateLabParamVisibility() {
+  const checkedMethods = new Set(
+    [...document.querySelectorAll('input[name="lab-method"]:checked')].map(el => el.value)
+  );
+  document.querySelectorAll('.lab-param-group').forEach(group => {
+    const method = group.dataset.method;
+    group.classList.toggle('hidden', !checkedMethods.has(method));
+  });
+}
+
+function updateParamBadge() {
+  const badge = document.getElementById('lab-params-badge');
+  const hasCustom = hasCustomParams();
+  badge.classList.toggle('hidden', !hasCustom);
+}
+
+function _getParamValue(method, key, spec) {
+  const el = document.getElementById(`lab-p-${method}-${key}`);
+  if (!el) return spec.default;
+  if (spec.options) return el.value;
+  if (el.type === 'checkbox') return el.checked ? 1 : 0;
+  return spec.type === 'float' ? parseFloat(el.value) : parseInt(el.value, 10);
+}
+
+function hasCustomParams() {
+  for (const [method, params] of Object.entries(labParamSchema)) {
+    for (const [key, spec] of Object.entries(params)) {
+      const val = _getParamValue(method, key, spec);
+      if (val !== spec.default) return true;
+    }
+  }
+  return false;
+}
+
+function collectLabParams() {
+  const params = {};
+  for (const [method, schema] of Object.entries(labParamSchema)) {
+    const methodParams = {};
+    let anyCustom = false;
+    for (const [key, spec] of Object.entries(schema)) {
+      const val = _getParamValue(method, key, spec);
+      if (val !== spec.default) {
+        methodParams[key] = val;
+        anyCustom = true;
+      }
+    }
+    if (anyCustom) params[method] = methodParams;
+  }
+  return params;
+}
+
+function resetLabParams() {
+  for (const [method, params] of Object.entries(labParamSchema)) {
+    for (const [key, spec] of Object.entries(params)) {
+      const el = document.getElementById(`lab-p-${method}-${key}`);
+      const rangeEl = document.getElementById(`lab-r-${method}-${key}`);
+      if (!el) continue;
+      if (spec.options) {
+        el.value = spec.default;
+      } else if (el.type === 'checkbox') {
+        el.checked = !!spec.default;
+      } else {
+        el.value = spec.default;
+      }
+      if (rangeEl) rangeEl.value = spec.default;
+    }
+  }
+  updateParamBadge();
+}
+
+// Toggle params panel
+document.getElementById('lab-params-toggle').addEventListener('click', () => {
+  const panel = document.getElementById('lab-params-panel');
+  const chevron = document.querySelector('.lab-toggle-chevron');
+  panel.classList.toggle('hidden');
+  chevron.classList.toggle('lab-toggle-open');
+});
+
+document.getElementById('lab-params-reset').addEventListener('click', resetLabParams);
+
+async function loadLabFeeds() {
+  try {
+    const data = await api('/api/feeds');
+    const all = [...new Set([...(data.configured || []), ...(data.discovered || [])])].sort();
+    setOptions(labFeed, all, '— select feed —');
+  } catch (e) { console.error(e); }
+}
+
+labFeed.addEventListener('change', async () => {
+  const feed = labFeed.value;
+  if (!feed) return;
+  try {
+    const data = await api(`/api/recordings?feed_id=${encodeURIComponent(feed)}`);
+    setOptions(labDate, data.dates || [], '— select date —');
+    labFile.innerHTML = '';
+    labResultsEl.innerHTML = '';
+  } catch (e) { console.error(e); }
+});
+
+labDate.addEventListener('change', async () => {
+  const feed = labFeed.value, date = labDate.value;
+  if (!feed || !date) return;
+  try {
+    const data = await api(`/api/recordings?feed_id=${encodeURIComponent(feed)}&date=${encodeURIComponent(date)}`);
+    const recs = data.recordings || [];
+    labFile.innerHTML = '<option value="">— select recording —</option>';
+    recs.forEach(r => {
+      const o = document.createElement('option');
+      o.value = r.filename;
+      o.textContent = r.filename;
+      labFile.appendChild(o);
+    });
+    labResultsEl.innerHTML = '';
+  } catch (e) { console.error(e); }
+});
+
+labFile.addEventListener('change', async () => {
+  const feed = labFeed.value, date = labDate.value, file = labFile.value;
+  labResultsEl.innerHTML = '';
+  if (!feed || !date || !file) return;
+
+  const origPlayer = document.getElementById('lab-original-player');
+  const origAudio = document.getElementById('lab-original-audio');
+  origAudio.src = `/api/audio/${encodeURIComponent(feed)}/${encodeURIComponent(date)}/${encodeURIComponent(file)}`;
+  origPlayer.classList.remove('hidden');
+
+  await loadLabArtifacts();
+});
+
+async function loadLabArtifacts() {
+  const feed = labFeed.value, date = labDate.value, file = labFile.value;
+  if (!feed || !date || !file) return;
+
+  try {
+    const data = await api(`/api/preprocess/artifacts?feed_id=${encodeURIComponent(feed)}&date=${encodeURIComponent(date)}&filename=${encodeURIComponent(file)}`);
+    renderLabResults(data.artifacts || [], feed, date);
+  } catch (e) { console.error(e); }
+}
+
+labRunBtn.addEventListener('click', runLabPreprocess);
+
+async function runLabPreprocess() {
+  const feed = labFeed.value, date = labDate.value, file = labFile.value;
+  if (!feed || !date || !file) {
+    labStatus.textContent = 'Select feed, date, and recording first.';
+    labStatus.className = 'text-sm text-red-400';
+    return;
+  }
+
+  const checked = [...document.querySelectorAll('input[name="lab-method"]:checked')].map(el => el.value);
+  if (!checked.length) {
+    labStatus.textContent = 'Select at least one preprocessing method.';
+    labStatus.className = 'text-sm text-red-400';
+    return;
+  }
+
+  const params = collectLabParams();
+  const paramInfo = Object.keys(params).length ? ' (custom params)' : '';
+
+  labRunBtn.disabled = true;
+  labStatus.textContent = `Running ${checked.join(', ')}${paramInfo}...`;
+  labStatus.className = 'text-sm text-gray-300 animate-pulse';
+
+  try {
+    const payload = { feed_id: feed, date, filename: file, methods: checked };
+    if (Object.keys(params).length) payload.params = params;
+
+    const result = await api('/api/preprocess/run', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const ok = (result.results || []).filter(r => r.success).length;
+    const fail = (result.results || []).filter(r => !r.success).length;
+    labStatus.textContent = `Done: ${ok} succeeded, ${fail} failed.`;
+    labStatus.className = fail > 0 ? 'text-sm text-yellow-400' : 'text-sm text-green-400';
+    await loadLabArtifacts();
+  } catch (e) {
+    labStatus.textContent = `Error: ${e.message}`;
+    labStatus.className = 'text-sm text-red-400';
+  } finally {
+    labRunBtn.disabled = false;
+  }
+}
+
+function _formatParamTag(tag) {
+  if (!tag) return '';
+  return tag
+    .replace(/([a-z_]+?)(\-?[\d.]+)/g, (_, k, v) => {
+      const labels = { i: 'intensity', v: 'version', highpass_freq: 'hp', lowpass_freq: 'lp',
+        noise_floor_db: 'nf', noise_reduction: 'nr', dynaudnorm_peak: 'peak',
+        dynaudnorm_smoothing: 'smooth', silence_threshold_db: 'sil',
+        silence_stop_duration: 'sildur', leave_silence: 'gap',
+        noise_sample_duration: 'sample', intensity_ratio: 'intensity',
+        effect_version: 'ver', enable_vad: 'vad' };
+      return `${labels[k] || k} ${v}`;
+    })
+    .replace(/_/g, ', ')
+    .replace(/derev/g, 'dereverb')
+    .replace(/vad/g, 'vad on');
+}
+
+function renderLabResults(artifacts, feed, date) {
+  const header = document.getElementById('lab-results-header');
+  if (!artifacts.length) {
+    header.classList.add('hidden');
+    labResultsEl.innerHTML = '<p class="text-gray-500 text-center py-8">No preprocessed versions yet. Select methods and click Run.</p>';
+    return;
+  }
+
+  header.classList.remove('hidden');
+
+  labResultsEl.innerHTML = artifacts.map(a => {
+    const url = `/api/preprocessed/${encodeURIComponent(feed)}/${encodeURIComponent(date)}/${encodeURIComponent(a.filename)}`;
+    const size = fmtBytes(a.size_bytes);
+    const customBadge = a.is_custom ? '<span class="lab-custom-badge">custom</span>' : '';
+    const paramInfo = a.param_tag ? `<span class="text-xs text-yellow-400/70">${esc(_formatParamTag(a.param_tag))}</span>` : '';
+    const timeStr = a.mtime_iso || '';
+    return `
+      <div class="card lab-result-card">
+        <div class="flex items-center gap-2 mb-2">
+          <span class="inline-block px-2 py-0.5 rounded text-xs font-bold uppercase
+            ${a.method === 'maxine' ? 'bg-green-900/50 text-green-400' :
+              a.method === 'none' ? 'bg-gray-800 text-gray-400' :
+              'bg-brand-900/50 text-brand-400'}">${esc(a.method)}</span>
+          ${customBadge}
+          ${paramInfo}
+          <span class="flex-1"></span>
+          <span class="text-xs text-gray-600 shrink-0">${size}</span>
+          <span class="text-xs text-gray-700 shrink-0">${esc(timeStr)}</span>
+          <button type="button" class="lab-delete-btn" data-filename="${esc(a.filename)}" title="Delete this file">
+            <svg class="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193V3.75A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z" clip-rule="evenodd"/></svg>
+          </button>
+        </div>
+        <audio controls preload="metadata" class="w-full rounded-lg">
+          <source src="${url}" type="${a.ext === '.mp3' ? 'audio/mpeg' : 'audio/wav'}" />
+        </audio>
+      </div>`;
+  }).join('');
+
+  labResultsEl.querySelectorAll('.lab-delete-btn').forEach(btn => {
+    btn.addEventListener('click', () => deleteLabArtifact(btn.dataset.filename));
+  });
+}
+
+async function deleteLabArtifact(targetFilename) {
+  const feed = labFeed.value, date = labDate.value, file = labFile.value;
+  if (!feed || !date || !file) return;
+  try {
+    await api('/api/preprocess/artifacts', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feed_id: feed, date, filename: file, target: targetFilename }),
+    });
+    await loadLabArtifacts();
+  } catch (e) {
+    console.error('Delete failed', e);
+  }
+}
+
+async function clearAllLabArtifacts() {
+  const feed = labFeed.value, date = labDate.value, file = labFile.value;
+  if (!feed || !date || !file) return;
+  try {
+    const result = await api('/api/preprocess/artifacts', {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feed_id: feed, date, filename: file, target: 'all' }),
+    });
+    labStatus.textContent = `Cleared ${result.deleted} file(s).`;
+    labStatus.className = 'text-sm text-gray-400';
+    await loadLabArtifacts();
+  } catch (e) {
+    console.error('Clear all failed', e);
+  }
+}
+
+document.getElementById('lab-clear-all').addEventListener('click', clearAllLabArtifacts);
+
 // ─────────────────── Initialization ────────────────────
 loadOverview();
 loadBrowserFeeds();
 loadRecentFlights();
 loadProfileFeeds();
 loadProfileSummary();
+loadLabStatus();
+loadLabFeeds();

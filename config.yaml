@@ -41,7 +41,9 @@ recording:
 
 # Transcription defaults (used by transcribe-watch and CLI commands)
 transcription:
-  preprocess: ffmpeg_vad      # none | ffmpeg | ffmpeg_vad | sox
+  preprocess: ffmpeg_vad      # none | ffmpeg | ffmpeg_vad | sox | maxine
+  preprocess_output_dir: ./recordings/preprocessed
+  keep_preprocessed_audio: false
   segment_by_pauses: true     # segment by silence and timestamp each segment
   min_silence_duration: 0.5   # seconds of silence to detect a pause
   silence_threshold_dB: -30   # dB below which is considered silence
@@ -82,14 +84,12 @@ rag:
     top_k_default: 10
     top_k_max: 50
 
-# Flight tracking and entity extraction
+# Flight entity extraction
 tracking:
-  opensky:
+  entity_extraction:
     enabled: true
-    credentials_file: ./credentials.json
-    cache_ttl_seconds: 3600
-    # Bounding box ~50nm around DCA
-    bbox_lamin: 38.0
-    bbox_lamax: 39.7
-    bbox_lomin: -77.9
-    bbox_lomax: -76.2
+    extract_callsigns: true
+    extract_runways: true
+    extract_altitudes: true
+    extract_frequencies: true
+    min_confidence: 0.5

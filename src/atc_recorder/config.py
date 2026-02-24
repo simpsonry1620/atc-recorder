@@ -21,7 +21,9 @@ class RecordingConfig:
 class TranscriptionConfig:
     """Configuration for transcription (segment-by-pauses, export format)."""
 
-    preprocess: str = "none"  # none, ffmpeg, ffmpeg_vad, sox
+    preprocess: str = "none"  # none, ffmpeg, ffmpeg_vad, sox, maxine
+    preprocess_output_dir: str = "./recordings/preprocessed"
+    keep_preprocessed_audio: bool = False
     segment_by_pauses: bool = False
     min_silence_duration: float = 0.5
     silence_threshold_dB: float = -30.0
@@ -98,26 +100,10 @@ class EntityExtractionConfig:
 
 
 @dataclass
-class OpenSkyConfig:
-    """OpenSky Network integration configuration."""
-
-    enabled: bool = False
-    credentials_file: str = "./credentials.json"
-    cache_ttl_seconds: int = 3600
-    max_requests_per_day: int = 100
-    bbox_lamin: float = 38.0
-    bbox_lamax: float = 39.7
-    bbox_lomin: float = -77.9
-    bbox_lomax: float = -76.2
-
-
-@dataclass
 class TrackingConfig:
-    """Flight tracking and entity extraction configuration."""
+    """Flight entity extraction configuration."""
 
     entity_extraction: EntityExtractionConfig = field(default_factory=EntityExtractionConfig)
-    opensky: OpenSkyConfig = field(default_factory=OpenSkyConfig)
-    enrichment_db_path: str = "./recordings/flight_enrichment.db"
 
 
 @dataclass
@@ -176,6 +162,8 @@ class Config:
             t = data['transcription']
             transcription_config = TranscriptionConfig(
                 preprocess=t.get('preprocess', 'none'),
+                preprocess_output_dir=t.get('preprocess_output_dir', './recordings/preprocessed'),
+                keep_preprocessed_audio=t.get('keep_preprocessed_audio', False),
                 segment_by_pauses=t.get('segment_by_pauses', False),
                 min_silence_duration=t.get('min_silence_duration', 0.5),
                 silence_threshold_dB=t.get('silence_threshold_dB', -30.0),
@@ -235,7 +223,6 @@ class Config:
         if "tracking" in data:
             tk = data["tracking"]
             ee = tk.get("entity_extraction", {})
-            os_data = tk.get("opensky", {})
             tracking_config = TrackingConfig(
                 entity_extraction=EntityExtractionConfig(
                     enabled=ee.get("enabled", True),
@@ -245,17 +232,6 @@ class Config:
                     extract_frequencies=ee.get("extract_frequencies", True),
                     min_confidence=ee.get("min_confidence", 0.5),
                 ),
-                opensky=OpenSkyConfig(
-                    enabled=os_data.get("enabled", False),
-                    credentials_file=os_data.get("credentials_file", "./credentials.json"),
-                    cache_ttl_seconds=os_data.get("cache_ttl_seconds", 3600),
-                    max_requests_per_day=os_data.get("max_requests_per_day", 100),
-                    bbox_lamin=float(os_data.get("bbox_lamin", 38.0)),
-                    bbox_lamax=float(os_data.get("bbox_lamax", 39.7)),
-                    bbox_lomin=float(os_data.get("bbox_lomin", -77.9)),
-                    bbox_lomax=float(os_data.get("bbox_lomax", -76.2)),
-                ),
-                enrichment_db_path=tk.get("enrichment_db_path", "./recordings/flight_enrichment.db"),
             )
 
         output_dir = data.get('output_dir', './recordings')
@@ -296,6 +272,8 @@ class Config:
         if self.transcription is not None:
             d['transcription'] = {
                 'preprocess': self.transcription.preprocess,
+                'preprocess_output_dir': self.transcription.preprocess_output_dir,
+                'keep_preprocessed_audio': self.transcription.keep_preprocessed_audio,
                 'segment_by_pauses': self.transcription.segment_by_pauses,
                 'min_silence_duration': self.transcription.min_silence_duration,
                 'silence_threshold_dB': self.transcription.silence_threshold_dB,
@@ -350,17 +328,6 @@ class Config:
                     "extract_frequencies": self.tracking.entity_extraction.extract_frequencies,
                     "min_confidence": self.tracking.entity_extraction.min_confidence,
                 },
-                "opensky": {
-                    "enabled": self.tracking.opensky.enabled,
-                    "credentials_file": self.tracking.opensky.credentials_file,
-                    "cache_ttl_seconds": self.tracking.opensky.cache_ttl_seconds,
-                    "max_requests_per_day": self.tracking.opensky.max_requests_per_day,
-                    "bbox_lamin": self.tracking.opensky.bbox_lamin,
-                    "bbox_lamax": self.tracking.opensky.bbox_lamax,
-                    "bbox_lomin": self.tracking.opensky.bbox_lomin,
-                    "bbox_lomax": self.tracking.opensky.bbox_lomax,
-                },
-                "enrichment_db_path": self.tracking.enrichment_db_path,
             }
         return d
     

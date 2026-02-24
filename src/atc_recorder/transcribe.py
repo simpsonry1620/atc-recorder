@@ -3,6 +3,8 @@
 import json
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import tempfile
 import time
@@ -187,29 +189,236 @@ class AudioPreprocess(Enum):
     FFMPEG = "ffmpeg"       # FFmpeg filters (highpass, lowpass, afftdn, dynaudnorm)
     FFMPEG_VAD = "ffmpeg_vad"  # FFmpeg with VAD to remove static/silence
     SOX = "sox"             # Sox noisered with auto noise profile
+    MAXINE = "maxine"       # NVIDIA Maxine Audio Effects via local CLI wrapper
 
 
-def preprocess_audio_ffmpeg(input_path: Path, output_path: Path) -> bool:
+def _default_wav_convert(input_path: Path, output_path: Path) -> bool:
+    """Convert audio to mono 16kHz 16-bit WAV without enhancement."""
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i", str(input_path),
+        "-ac", "1",
+        "-ar", "16000",
+        "-sample_fmt", "s16",
+        "-f", "wav",
+        str(output_path),
+    ]
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        if result.returncode != 0:
+            logger.error(f"ffmpeg conversion failed: {result.stderr[:500]}")
+            return False
+        return True
+    except Exception as e:
+        logger.error(f"ffmpeg conversion error: {e}")
+        return False
+
+
+def _convert_to_maxine_wav(input_path: Path, output_path: Path) -> bool:
+    """Convert audio to 32-bit float mono 16kHz WAV with simple RIFF header.
+
+    Maxine requires IEEE-float samples and rejects the WAVE_FORMAT_EXTENSIBLE
+    header that ffmpeg produces with ``-c:a pcm_f32le``.  We decode via ffmpeg
+    to raw float32 PCM, then write a minimal RIFF/WAV wrapper in Python.
+    """
+    import struct
+
+    with tempfile.NamedTemporaryFile(suffix=".pcm", delete=False) as tmp:
+        raw_path = Path(tmp.name)
+
+    try:
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", str(input_path),
+            "-ac", "1", "-ar", "16000",
+            "-f", "f32le",
+            str(raw_path),
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+        if result.returncode != 0:
+            logger.error(f"ffmpeg raw float conversion failed: {result.stderr[:500]}")
+            return False
+
+        pcm = raw_path.read_bytes()
+        sample_rate = 16000
+        channels = 1
+        bits = 32
+        byte_rate = sample_rate * channels * bits // 8
+        block_align = channels * bits // 8
+        data_size = len(pcm)
+
+        with open(output_path, "wb") as out:
+            out.write(b"RIFF")
+            out.write(struct.pack("<I", 36 + data_size))
+            out.write(b"WAVE")
+            out.write(b"fmt ")
+            out.write(struct.pack("<I", 16))
+            out.write(struct.pack("<H", 3))  # IEEE Float
+            out.write(struct.pack("<H", channels))
+            out.write(struct.pack("<I", sample_rate))
+            out.write(struct.pack("<I", byte_rate))
+            out.write(struct.pack("<H", block_align))
+            out.write(struct.pack("<H", bits))
+            out.write(b"data")
+            out.write(struct.pack("<I", data_size))
+            out.write(pcm)
+        return True
+    except Exception as e:
+        logger.error(f"Maxine WAV conversion error: {e}")
+        return False
+    finally:
+        if raw_path.exists():
+            raw_path.unlink()
+
+
+def _maxine_cli_args(
+    input_path: Path,
+    output_path: Path,
+    *,
+    intensity_ratio: Optional[float] = None,
+    effect_version: Optional[int] = None,
+    enable_vad: bool = False,
+    effect: Optional[str] = None,
+) -> list[str]:
+    """Build Maxine command from env template or default wrapper."""
+    template = os.environ.get("MAXINE_AUDIO_CMD_TEMPLATE", "").strip()
+    if template:
+        return shlex.split(template.format(input=str(input_path), output=str(output_path)))
+    cli = os.environ.get("MAXINE_AUDIO_CLI", "maxine_denoise.sh")
+    cmd = [cli, "--input", str(input_path), "--output", str(output_path)]
+    if intensity_ratio is not None:
+        cmd += ["--intensity-ratio", str(intensity_ratio)]
+    if effect_version is not None:
+        cmd += ["--effect-version", str(effect_version)]
+    if enable_vad:
+        cmd += ["--enable-vad"]
+    if effect is not None:
+        cmd += ["--effect", effect]
+    return cmd
+
+
+def _maxine_available() -> bool:
+    """Check whether a Maxine CLI command appears available."""
+    try:
+        args = _maxine_cli_args(Path("in.wav"), Path("out.wav"))
+    except Exception:
+        return False
+    if not args:
+        return False
+    return shutil.which(args[0]) is not None or Path(args[0]).is_file()
+
+
+def _build_preprocess_output_path(
+    audio_path: Path,
+    preprocess: AudioPreprocess,
+    preprocess_output_dir: Optional[Path],
+    recordings_root: Optional[Path],
+) -> Optional[Path]:
+    """Resolve deterministic artifact path under preprocess_output_dir."""
+    if preprocess_output_dir is None:
+        return None
+
+    output_root = Path(preprocess_output_dir)
+    if not output_root.is_absolute():
+        output_root = Path.cwd() / output_root
+
+    rel_parent = Path()
+    if recordings_root is not None:
+        try:
+            rel_parent = audio_path.parent.resolve().relative_to(recordings_root.resolve())
+        except Exception:
+            rel_parent = Path()
+
+    artifact_dir = output_root / rel_parent
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    return artifact_dir / f"{audio_path.stem}_{preprocess.value}.wav"
+
+
+def preprocess_audio_maxine(
+    input_path: Path,
+    output_path: Path,
+    *,
+    intensity_ratio: float = 1.0,
+    effect_version: int = 1,
+    enable_vad: bool = False,
+    effect: str = "denoiser",
+) -> bool:
+    """Apply NVIDIA Maxine preprocessing through a local CLI wrapper.
+
+    Maxine expects 32-bit float mono 16 kHz WAV with a simple RIFF header.
+    We convert input -> float WAV, run Maxine, then convert output back to
+    16-bit PCM WAV for downstream ASR consumption. All parameters can be
+    overridden for experimentation.
+    """
+    if not _maxine_available():
+        logger.warning(
+            "Maxine CLI not found. Set MAXINE_AUDIO_CLI or MAXINE_AUDIO_CMD_TEMPLATE."
+        )
+        return False
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        tmpdir_path = Path(tmpdir)
+        maxine_input = tmpdir_path / "maxine_input.wav"
+        maxine_output = tmpdir_path / "maxine_output.wav"
+
+        if not _convert_to_maxine_wav(input_path, maxine_input):
+            return False
+
+        extra: dict = {}
+        if intensity_ratio != 1.0:
+            extra["intensity_ratio"] = intensity_ratio
+        if effect_version != 1:
+            extra["effect_version"] = effect_version
+        if enable_vad:
+            extra["enable_vad"] = True
+        if effect != "denoiser":
+            extra["effect"] = effect
+        cmd = _maxine_cli_args(maxine_input, maxine_output, **extra)
+        try:
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+            if result.returncode != 0:
+                logger.error(f"Maxine preprocessing failed: {result.stderr[:500]}")
+                return False
+            if not maxine_output.exists() or maxine_output.stat().st_size == 0:
+                logger.error("Maxine preprocessing produced no output audio")
+                return False
+            return _default_wav_convert(maxine_output, output_path)
+        except Exception as e:
+            logger.error(f"Maxine preprocessing error: {e}")
+            return False
+
+
+def preprocess_audio_ffmpeg(
+    input_path: Path,
+    output_path: Path,
+    *,
+    highpass_freq: int = 300,
+    lowpass_freq: int = 3400,
+    noise_floor_db: int = -25,
+    dynaudnorm_peak: float = 0.9,
+    dynaudnorm_smoothing: int = 5,
+) -> bool:
     """Apply ffmpeg-based audio preprocessing for ATC radio.
     
-    Uses bandpass filtering (300-3400Hz for voice), FFT-based noise reduction,
-    and dynamic normalization.
-    
-    Args:
-        input_path: Input audio file
-        output_path: Output WAV file path
-        
-    Returns:
-        True if successful, False otherwise
+    Uses bandpass filtering, FFT-based noise reduction, and dynamic normalization.
+    All filter parameters can be overridden for experimentation.
     """
-    # ATC radio voice band: 300Hz - 3400Hz
-    # afftdn: FFT-based denoiser, nf=-25 is noise floor in dB
-    # dynaudnorm: Dynamic audio normalizer for consistent levels
     filters = [
-        "highpass=f=300",           # Remove low-frequency rumble/hum
-        "lowpass=f=3400",           # Remove high-frequency hiss  
-        "afftdn=nf=-25",            # FFT-based noise reduction
-        "dynaudnorm=p=0.9:s=5",     # Normalize with 90% peak, 5s smoothing
+        f"highpass=f={highpass_freq}",
+        f"lowpass=f={lowpass_freq}",
+        f"afftdn=nf={noise_floor_db}",
+        f"dynaudnorm=p={dynaudnorm_peak}:s={dynaudnorm_smoothing}",
     ]
     
     cmd = [
@@ -242,35 +451,32 @@ def preprocess_audio_ffmpeg(input_path: Path, output_path: Path) -> bool:
         return False
 
 
-def preprocess_audio_ffmpeg_vad(input_path: Path, output_path: Path) -> bool:
+def preprocess_audio_ffmpeg_vad(
+    input_path: Path,
+    output_path: Path,
+    *,
+    highpass_freq: int = 300,
+    lowpass_freq: int = 3400,
+    noise_floor_db: int = -20,
+    silence_stop_duration: float = 0.3,
+    silence_threshold_db: int = -30,
+    leave_silence: float = 0.1,
+    dynaudnorm_peak: float = 0.9,
+    dynaudnorm_smoothing: int = 3,
+) -> bool:
     """Apply ffmpeg preprocessing with Voice Activity Detection.
     
     Applies noise reduction, then uses silenceremove to strip static/silence
-    sections that cause Whisper to hallucinate. Keeps only segments with
-    actual speech above the threshold.
-    
-    Args:
-        input_path: Input audio file
-        output_path: Output WAV file path
-        
-    Returns:
-        True if successful, False otherwise
+    sections that cause Whisper to hallucinate. All parameters can be
+    overridden for experimentation.
     """
-    # Filter chain:
-    # 1. Bandpass filter for voice frequencies
-    # 2. Noise reduction
-    # 3. silenceremove to strip static sections:
-    #    - stop_periods=-1: remove all silence, not just at edges
-    #    - stop_duration=0.3: min 0.3s of silence to trigger removal
-    #    - stop_threshold=-30dB: audio below -30dB is considered silence/static
-    #    - leave_silence=0.1: leave 0.1s of silence between speech for natural gaps
-    # 4. Dynamic normalization
     filters = [
-        "highpass=f=300",
-        "lowpass=f=3400",
-        "afftdn=nf=-20",  # Slightly more aggressive noise reduction
-        "silenceremove=stop_periods=-1:stop_duration=0.3:stop_threshold=-30dB:leave_silence=0.1",
-        "dynaudnorm=p=0.9:s=3",
+        f"highpass=f={highpass_freq}",
+        f"lowpass=f={lowpass_freq}",
+        f"afftdn=nf={noise_floor_db}",
+        f"silenceremove=stop_periods=-1:stop_duration={silence_stop_duration}"
+        f":stop_threshold={silence_threshold_db}dB:leave_silence={leave_silence}",
+        f"dynaudnorm=p={dynaudnorm_peak}:s={dynaudnorm_smoothing}",
     ]
     
     cmd = [
@@ -297,7 +503,6 @@ def preprocess_audio_ffmpeg_vad(input_path: Path, output_path: Path) -> bool:
             logger.error(f"ffmpeg VAD preprocessing failed: {result.stderr[:500]}")
             return False
         
-        # Check if output file has content (VAD might strip everything if too aggressive)
         if output_path.stat().st_size < 1000:
             logger.warning("VAD removed most audio - file may be mostly static")
         
@@ -308,18 +513,20 @@ def preprocess_audio_ffmpeg_vad(input_path: Path, output_path: Path) -> bool:
         return False
 
 
-def preprocess_audio_sox(input_path: Path, output_path: Path) -> bool:
+def preprocess_audio_sox(
+    input_path: Path,
+    output_path: Path,
+    *,
+    noise_sample_duration: float = 0.5,
+    noise_reduction: float = 0.21,
+    highpass_freq: int = 300,
+    lowpass_freq: int = 3400,
+) -> bool:
     """Apply sox-based audio preprocessing with automatic noise profiling.
     
-    Uses the first 0.5s of audio to build a noise profile, then applies
-    noise reduction along with bandpass filtering.
-    
-    Args:
-        input_path: Input audio file
-        output_path: Output WAV file path
-        
-    Returns:
-        True if successful, False otherwise
+    Uses an initial segment of audio to build a noise profile, then applies
+    noise reduction along with bandpass filtering. All parameters can be
+    overridden for experimentation.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir = Path(tmpdir)
@@ -328,12 +535,11 @@ def preprocess_audio_sox(input_path: Path, output_path: Path) -> bool:
         intermediate = tmpdir / "intermediate.wav"
         
         try:
-            # Step 1: Extract first 0.5s for noise profile (usually dead air/static)
             cmd_extract = [
                 "sox",
                 str(input_path),
                 str(noise_sample),
-                "trim", "0", "0.5",
+                "trim", "0", str(noise_sample_duration),
                 "rate", "16000",
                 "channels", "1",
             ]
@@ -342,11 +548,10 @@ def preprocess_audio_sox(input_path: Path, output_path: Path) -> bool:
                 logger.error(f"Sox noise sample extraction failed: {result.stderr[:300]}")
                 return False
             
-            # Step 2: Generate noise profile
             cmd_profile = [
                 "sox",
                 str(noise_sample),
-                "-n",  # null output
+                "-n",
                 "noiseprof",
                 str(noise_profile),
             ]
@@ -355,25 +560,22 @@ def preprocess_audio_sox(input_path: Path, output_path: Path) -> bool:
                 logger.error(f"Sox noise profile failed: {result.stderr[:300]}")
                 return False
             
-            # Step 3: Apply noise reduction + bandpass filter
-            # noisered 0.21 = 21% noise reduction (conservative to avoid artifacts)
             cmd_reduce = [
                 "sox",
                 str(input_path),
                 str(intermediate),
                 "rate", "16000",
                 "channels", "1",
-                "noisered", str(noise_profile), "0.21",
-                "highpass", "300",
-                "lowpass", "3400",
-                "norm",  # Normalize audio levels
+                "noisered", str(noise_profile), str(noise_reduction),
+                "highpass", str(highpass_freq),
+                "lowpass", str(lowpass_freq),
+                "norm",
             ]
             result = subprocess.run(cmd_reduce, capture_output=True, text=True, timeout=300)
             if result.returncode != 0:
                 logger.error(f"Sox noise reduction failed: {result.stderr[:300]}")
                 return False
             
-            # Step 4: Convert to 16-bit WAV (sox output might be different bit depth)
             cmd_convert = [
                 "ffmpeg",
                 "-y",
@@ -550,6 +752,9 @@ class TranscriptionResult:
     language: str = ""
     duration_seconds: float = 0.0
     segments: list = field(default_factory=list)
+    preprocess_requested: str = "none"
+    preprocess_applied: str = "none"
+    preprocess_fallback_chain: list[str] = field(default_factory=list)
     error: Optional[str] = None
     transcribed_at: Optional[datetime] = None
 
@@ -709,6 +914,9 @@ class WhisperClient:
         self,
         audio_path: Path,
         preprocess: AudioPreprocess = AudioPreprocess.NONE,
+        preprocess_output_dir: Optional[Path] = None,
+        keep_preprocessed_audio: bool = False,
+        recordings_root: Optional[Path] = None,
         segment_by_pauses: bool = False,
         min_silence_duration: float = 0.5,
         silence_threshold_dB: float = -30.0,
@@ -736,18 +944,35 @@ class WhisperClient:
             TranscriptionResult object
         """
         audio_path = Path(audio_path)
+        preprocess_requested = preprocess.value
+        preprocess_applied = preprocess.value
+        preprocess_fallback_chain: list[str] = []
         
         if not audio_path.exists():
             return TranscriptionResult(
                 success=False,
                 audio_file=audio_path,
                 error=f"Audio file not found: {audio_path}",
+                preprocess_requested=preprocess_requested,
+                preprocess_applied=preprocess_applied,
+                preprocess_fallback_chain=preprocess_fallback_chain,
             )
-        
-        # Convert to WAV using ffmpeg (with optional preprocessing)
-        with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
-            wav_path = Path(tmp.name)
-        
+
+        if keep_preprocessed_audio:
+            wav_path = _build_preprocess_output_path(
+                audio_path=audio_path,
+                preprocess=preprocess,
+                preprocess_output_dir=preprocess_output_dir,
+                recordings_root=recordings_root,
+            )
+            if wav_path is None:
+                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+                    wav_path = Path(tmp.name)
+                    keep_preprocessed_audio = False
+        else:
+            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+                wav_path = Path(tmp.name)
+
         try:
             # Apply preprocessing if requested
             if preprocess == AudioPreprocess.FFMPEG:
@@ -758,6 +983,9 @@ class WhisperClient:
                         success=False,
                         audio_file=audio_path,
                         error="ffmpeg preprocessing failed",
+                        preprocess_requested=preprocess_requested,
+                        preprocess_applied=preprocess_applied,
+                        preprocess_fallback_chain=preprocess_fallback_chain,
                     )
             elif preprocess == AudioPreprocess.FFMPEG_VAD:
                 logger.info(f"Preprocessing with ffmpeg VAD: {audio_path.name}")
@@ -767,6 +995,9 @@ class WhisperClient:
                         success=False,
                         audio_file=audio_path,
                         error="ffmpeg VAD preprocessing failed",
+                        preprocess_requested=preprocess_requested,
+                        preprocess_applied=preprocess_applied,
+                        preprocess_fallback_chain=preprocess_fallback_chain,
                     )
             elif preprocess == AudioPreprocess.SOX:
                 logger.info(f"Preprocessing with sox noisered: {audio_path.name}")
@@ -776,37 +1007,53 @@ class WhisperClient:
                         success=False,
                         audio_file=audio_path,
                         error="sox preprocessing failed",
+                        preprocess_requested=preprocess_requested,
+                        preprocess_applied=preprocess_applied,
+                        preprocess_fallback_chain=preprocess_fallback_chain,
                     )
+            elif preprocess == AudioPreprocess.MAXINE:
+                logger.info(f"Preprocessing with NVIDIA Maxine: {audio_path.name}")
+                success = preprocess_audio_maxine(audio_path, wav_path)
+                if not success:
+                    preprocess_fallback_chain.append(AudioPreprocess.FFMPEG_VAD.value)
+                    preprocess_applied = AudioPreprocess.FFMPEG_VAD.value
+                    logger.warning(
+                        "Maxine preprocessing failed/unavailable; falling back to ffmpeg_vad for %s",
+                        audio_path.name,
+                    )
+                    success = preprocess_audio_ffmpeg_vad(audio_path, wav_path)
+                    if not success:
+                        preprocess_fallback_chain.append(AudioPreprocess.NONE.value)
+                        preprocess_applied = AudioPreprocess.NONE.value
+                        logger.warning(
+                            "ffmpeg_vad fallback failed; falling back to raw conversion for %s",
+                            audio_path.name,
+                        )
+                        success = _default_wav_convert(audio_path, wav_path)
+                        if not success:
+                            return TranscriptionResult(
+                                success=False,
+                                audio_file=audio_path,
+                                error="maxine preprocessing failed; fallback conversion failed",
+                                preprocess_requested=preprocess_requested,
+                                preprocess_applied=preprocess_applied,
+                                preprocess_fallback_chain=preprocess_fallback_chain,
+                            )
             else:
                 # No preprocessing - just convert to WAV
-                cmd = [
-                    "ffmpeg",
-                    "-y",  # Overwrite output
-                    "-i", str(audio_path),
-                    "-ac", "1",  # Mono
-                    "-ar", "16000",  # 16kHz sample rate
-                    "-sample_fmt", "s16",  # 16-bit
-                    "-f", "wav",
-                    str(wav_path),
-                ]
-                
-                result = subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=300,  # 5 minute timeout
-                )
-                
-                if result.returncode != 0:
+                if not _default_wav_convert(audio_path, wav_path):
                     return TranscriptionResult(
                         success=False,
                         audio_file=audio_path,
-                        error=f"ffmpeg conversion failed: {result.stderr[:500]}",
+                        error="ffmpeg conversion failed",
+                        preprocess_requested=preprocess_requested,
+                        preprocess_applied=preprocess_applied,
+                        preprocess_fallback_chain=preprocess_fallback_chain,
                     )
             
             if segment_by_pauses:
                 logger.info(f"Segmenting by pauses: {audio_path.name}")
-                return self._transcribe_by_pauses(
+                pause_result = self._transcribe_by_pauses(
                     wav_path,
                     audio_path,
                     min_silence_duration=min_silence_duration,
@@ -816,6 +1063,10 @@ class WhisperClient:
                     diarization_enabled=diarization_enabled,
                     diarization_mode=diarization_mode,
                 )
+                pause_result.preprocess_requested = preprocess_requested
+                pause_result.preprocess_applied = preprocess_applied
+                pause_result.preprocess_fallback_chain = preprocess_fallback_chain
+                return pause_result
             
             # Check file size - gRPC has a 4MB limit
             # At 16kHz 16-bit mono = 32KB/sec, so 4MB = ~120 seconds
@@ -832,6 +1083,9 @@ class WhisperClient:
                     enabled=diarization_enabled,
                     mode=diarization_mode,
                 )
+                transcription.preprocess_requested = preprocess_requested
+                transcription.preprocess_applied = preprocess_applied
+                transcription.preprocess_fallback_chain = preprocess_fallback_chain
                 return transcription
             else:
                 # Large file - transcribe in chunks
@@ -842,11 +1096,14 @@ class WhisperClient:
                     enabled=diarization_enabled,
                     mode=diarization_mode,
                 )
+                transcription.preprocess_requested = preprocess_requested
+                transcription.preprocess_applied = preprocess_applied
+                transcription.preprocess_fallback_chain = preprocess_fallback_chain
                 return transcription
             
         finally:
-            # Clean up temp file
-            if wav_path.exists():
+            # Clean up temp file unless we explicitly keep preprocessing artifacts.
+            if wav_path.exists() and not keep_preprocessed_audio:
                 wav_path.unlink()
     
     def _transcribe_chunked(self, wav_path: Path, original_path: Path) -> TranscriptionResult:
@@ -1271,6 +1528,9 @@ def save_transcript(
         "language": result.language,
         "text": result.text,
         "segments": result.segments,
+        "preprocess_requested": result.preprocess_requested,
+        "preprocess_applied": result.preprocess_applied,
+        "preprocess_fallback_chain": result.preprocess_fallback_chain,
         "transcribed_at": result.transcribed_at.isoformat() if result.transcribed_at else None,
         "success": result.success,
     }
@@ -1459,6 +1719,8 @@ class TranscriptionWatcher:
         stitch_min_text_overlap_chars: int = 12,
         asr_model: str = "unknown",
         variant_store: Optional[object] = None,
+        preprocess_output_dir: Optional[Path] = None,
+        keep_preprocessed_audio: bool = False,
     ):
         """Initialize the watcher.
 
@@ -1502,6 +1764,8 @@ class TranscriptionWatcher:
         self._stitch_min_text_overlap_chars = stitch_min_text_overlap_chars
         self._asr_model = asr_model
         self._variant_store = variant_store
+        self._preprocess_output_dir = preprocess_output_dir
+        self._keep_preprocessed_audio = keep_preprocessed_audio
         self._observer = None
         self._running = False
     
@@ -1546,6 +1810,9 @@ class TranscriptionWatcher:
             result = self.client.convert_and_transcribe(
                 path,
                 preprocess=self._preprocess,
+                preprocess_output_dir=self._preprocess_output_dir,
+                keep_preprocessed_audio=self._keep_preprocessed_audio,
+                recordings_root=self.watch_dir,
                 segment_by_pauses=self._segment_by_pauses,
                 min_silence_duration=self._min_silence_duration,
                 silence_threshold_dB=self._silence_threshold_dB,
@@ -1559,7 +1826,7 @@ class TranscriptionWatcher:
                 save_transcript(
                     result,
                     asr_model=self._asr_model,
-                    preprocess=self._preprocess.value,
+                    preprocess=result.preprocess_applied,
                     variant_store=self._variant_store,
                     recordings_root=self.watch_dir,
                 )
@@ -1650,6 +1917,8 @@ def transcribe_file(
     language_code: str = "en-US",
     save: bool = True,
     preprocess: AudioPreprocess = AudioPreprocess.NONE,
+    preprocess_output_dir: Optional[Path] = None,
+    keep_preprocessed_audio: bool = False,
     segment_by_pauses: bool = False,
     min_silence_duration: float = 0.5,
     silence_threshold_dB: float = -30.0,
@@ -1704,6 +1973,9 @@ def transcribe_file(
     result = client.convert_and_transcribe(
         audio_path,
         preprocess=preprocess,
+        preprocess_output_dir=preprocess_output_dir,
+        keep_preprocessed_audio=keep_preprocessed_audio,
+        recordings_root=recordings_root,
         segment_by_pauses=segment_by_pauses,
         min_silence_duration=min_silence_duration,
         silence_threshold_dB=silence_threshold_dB,
@@ -1717,7 +1989,7 @@ def transcribe_file(
         save_transcript(
             result,
             asr_model=asr_model,
-            preprocess=preprocess.value,
+            preprocess=result.preprocess_applied,
             variant_store=variant_store,
             recordings_root=recordings_root,
         )
@@ -1746,6 +2018,8 @@ def watch_and_transcribe(
     grpc_port: int = None,
     language_code: str = "en-US",
     preprocess: AudioPreprocess = AudioPreprocess.NONE,
+    preprocess_output_dir: Optional[Path] = None,
+    keep_preprocessed_audio: bool = False,
     segment_by_pauses: bool = False,
     min_silence_duration: float = 0.5,
     silence_threshold_dB: float = -30.0,
@@ -1800,6 +2074,8 @@ def watch_and_transcribe(
         watch_dir=watch_dir,
         client=client,
         preprocess=preprocess,
+        preprocess_output_dir=preprocess_output_dir,
+        keep_preprocessed_audio=keep_preprocessed_audio,
         segment_by_pauses=segment_by_pauses,
         min_silence_duration=min_silence_duration,
         silence_threshold_dB=silence_threshold_dB,
@@ -1877,6 +2153,8 @@ def transcribe_all(
     on_progress: callable = None,
     force: bool = False,
     preprocess: AudioPreprocess = AudioPreprocess.NONE,
+    preprocess_output_dir: Optional[Path] = None,
+    keep_preprocessed_audio: bool = False,
     segment_by_pauses: bool = False,
     min_silence_duration: float = 0.5,
     silence_threshold_dB: float = -30.0,
@@ -1951,6 +2229,9 @@ def transcribe_all(
             result = client.convert_and_transcribe(
                 audio_file,
                 preprocess=preprocess,
+                preprocess_output_dir=preprocess_output_dir,
+                keep_preprocessed_audio=keep_preprocessed_audio,
+                recordings_root=Path(directory),
                 segment_by_pauses=segment_by_pauses,
                 min_silence_duration=min_silence_duration,
                 silence_threshold_dB=silence_threshold_dB,
@@ -2028,8 +2309,6 @@ def compare_preprocessing(
     Returns:
         Dict mapping preprocessing method name to TranscriptionResult
     """
-    import shutil
-    
     # Get defaults from environment
     if grpc_host is None:
         grpc_host = os.environ.get("WHISPER_GRPC_HOST", "localhost")
@@ -2067,6 +2346,10 @@ def compare_preprocessing(
     ]
     if sox_available:
         methods.append(("sox", AudioPreprocess.SOX))
+    if _maxine_available():
+        methods.append(("maxine", AudioPreprocess.MAXINE))
+    else:
+        logger.warning("Maxine CLI not found - maxine preprocessing will be skipped")
     
     base_name = audio_path.stem
     is_first = True

@@ -181,3 +181,259 @@ audio {
   filter: invert(1) hue-rotate(180deg);
   border-radius: 8px;
 }
+
+/* Audio Lab – method checkbox cards */
+.lab-method-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.875rem;
+  background: #1f2937;
+  border: 1px solid #374151;
+  border-radius: 0.5rem;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.lab-method-card:hover {
+  border-color: #4b5563;
+}
+.lab-method-card:has(input:checked) {
+  border-color: #0d84ff;
+  background: rgba(13, 132, 255, 0.08);
+}
+.lab-method-card input[type="checkbox"] {
+  accent-color: #0d84ff;
+}
+
+/* Audio Lab – parameter tuning toggle */
+.lab-params-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 0.25rem 0;
+  color: #9ca3af;
+  transition: color 0.15s;
+}
+.lab-params-toggle:hover {
+  color: #e5e7eb;
+}
+.lab-toggle-chevron {
+  width: 1rem;
+  height: 1rem;
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+}
+.lab-toggle-chevron.lab-toggle-open {
+  transform: rotate(90deg);
+}
+.lab-params-badge {
+  font-size: 0.625rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #facc15;
+  background: rgba(250, 204, 21, 0.12);
+  border: 1px solid rgba(250, 204, 21, 0.25);
+  border-radius: 0.25rem;
+  padding: 0.0625rem 0.375rem;
+}
+
+/* Audio Lab – parameter panel */
+.lab-params-panel {
+  margin-top: 0.75rem;
+  padding: 1rem;
+  background: rgba(17, 24, 39, 0.6);
+  border: 1px solid #1f2937;
+  border-radius: 0.5rem;
+}
+
+/* Audio Lab – parameter group per method */
+.lab-param-group {
+  padding-bottom: 0.75rem;
+  border-bottom: 1px solid #1f2937;
+}
+.lab-param-group:last-child {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+.lab-param-method-title {
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: #60a5fa;
+  margin-bottom: 0.5rem;
+}
+
+/* Audio Lab – individual parameter row */
+.lab-param-row {
+  display: grid;
+  grid-template-columns: 10rem 1fr 5rem 3.5rem;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.25rem 0;
+}
+@media (max-width: 640px) {
+  .lab-param-row {
+    grid-template-columns: 1fr 1fr;
+    gap: 0.375rem;
+  }
+  .lab-param-range { grid-column: 1 / -1; }
+}
+.lab-param-label {
+  font-size: 0.8125rem;
+  color: #d1d5db;
+  white-space: nowrap;
+}
+.lab-param-range {
+  width: 100%;
+  accent-color: #0d84ff;
+  cursor: pointer;
+}
+.lab-param-input {
+  background: #1f2937;
+  border: 1px solid #374151;
+  border-radius: 0.375rem;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.8125rem;
+  color: #e5e7eb;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  outline: none;
+  -moz-appearance: textfield;
+}
+.lab-param-input::-webkit-inner-spin-button,
+.lab-param-input::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+.lab-param-input:focus {
+  box-shadow: 0 0 0 2px #0d84ff;
+  border-color: transparent;
+}
+.lab-param-default {
+  color: #4b5563;
+  white-space: nowrap;
+}
+
+/* Audio Lab – select dropdown for options params */
+.lab-param-select {
+  background: #1f2937;
+  border: 1px solid #374151;
+  border-radius: 0.375rem;
+  padding: 0.25rem 0.5rem;
+  font-size: 0.8125rem;
+  color: #e5e7eb;
+  outline: none;
+  cursor: pointer;
+}
+.lab-param-select:focus {
+  box-shadow: 0 0 0 2px #0d84ff;
+  border-color: transparent;
+}
+.lab-param-row-select {
+  grid-template-columns: 10rem 1fr 3.5rem;
+}
+.lab-param-row-toggle {
+  grid-template-columns: 10rem auto 1fr;
+}
+
+/* Audio Lab – toggle switch for boolean params */
+.lab-toggle {
+  display: inline-flex;
+  align-items: center;
+  cursor: pointer;
+}
+.lab-toggle input {
+  position: absolute;
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+.lab-toggle-track {
+  position: relative;
+  width: 2.25rem;
+  height: 1.25rem;
+  background: #374151;
+  border-radius: 9999px;
+  transition: background 0.2s;
+}
+.lab-toggle input:checked + .lab-toggle-track {
+  background: #0d84ff;
+}
+.lab-toggle-thumb {
+  position: absolute;
+  top: 0.125rem;
+  left: 0.125rem;
+  width: 1rem;
+  height: 1rem;
+  background: #fff;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+.lab-toggle input:checked + .lab-toggle-track .lab-toggle-thumb {
+  transform: translateX(1rem);
+}
+
+/* Audio Lab – custom params badge on result cards */
+.lab-custom-badge {
+  display: inline-block;
+  font-size: 0.625rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #facc15;
+  background: rgba(250, 204, 21, 0.12);
+  border: 1px solid rgba(250, 204, 21, 0.25);
+  border-radius: 0.25rem;
+  padding: 0.0625rem 0.375rem;
+}
+
+/* Audio Lab – clear all button */
+.lab-clear-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.375rem;
+  padding: 0.25rem 0.625rem;
+  font-size: 0.75rem;
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.08);
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  border-radius: 0.375rem;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.lab-clear-btn:hover {
+  background: rgba(239, 68, 68, 0.15);
+  border-color: rgba(239, 68, 68, 0.4);
+}
+
+/* Audio Lab – per-card delete button */
+.lab-delete-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem;
+  color: #6b7280;
+  background: none;
+  border: none;
+  border-radius: 0.25rem;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s, color 0.15s;
+}
+.lab-result-card:hover .lab-delete-btn {
+  opacity: 1;
+}
+.lab-delete-btn:hover {
+  color: #ef4444;
+}
+
+/* Audio Lab – results grid */
+.lab-player-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(400px, 1fr));
+  gap: 1rem;
+}

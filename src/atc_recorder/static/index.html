@@ -44,6 +44,7 @@
       <button class="tab-btn" data-tab="flights">Flights</button>
       <button class="tab-btn" data-tab="profile">Positions</button>
       <button class="tab-btn" data-tab="embeddings">Embeddings</button>
+      <button class="tab-btn" data-tab="audiolab">Audio Lab</button>
     </nav>
 
     <!-- Tab panels -->
@@ -99,6 +100,7 @@
                 <option value="ffmpeg">ffmpeg</option>
                 <option value="ffmpeg_vad" selected>ffmpeg_vad</option>
                 <option value="sox">sox</option>
+                <option value="maxine">maxine</option>
               </select>
             </div>
             <button id="br-transcribe" class="btn-primary h-10">Run ASR</button>
@@ -238,6 +240,64 @@
         </div>
         <div id="em-plot" class="w-full rounded-xl overflow-hidden" style="height:560px;"></div>
         <div id="em-empty" class="text-gray-500 text-center py-12">Select a feed/date and load embeddings</div>
+      </section>
+
+      <!-- ═══════════ AUDIO LAB ═══════════ -->
+      <section id="panel-audiolab" class="tab-panel hidden p-6">
+        <div class="flex flex-wrap gap-4 items-end mb-6">
+          <div>
+            <label class="label">Feed</label>
+            <select id="lab-feed" class="input w-52"></select>
+          </div>
+          <div>
+            <label class="label">Date</label>
+            <select id="lab-date" class="input w-44"></select>
+          </div>
+          <div>
+            <label class="label">Recording</label>
+            <select id="lab-file" class="input w-64"></select>
+          </div>
+        </div>
+
+        <div class="card mb-4">
+          <h3 class="card-title">Original</h3>
+          <div id="lab-original-player" class="hidden mt-3">
+            <audio id="lab-original-audio" controls class="w-full rounded-lg"></audio>
+          </div>
+        </div>
+
+        <div class="card mb-4">
+          <h3 class="card-title">Preprocessing Methods</h3>
+          <div id="lab-methods" class="mt-3 flex flex-wrap gap-3"></div>
+
+          <div id="lab-params-section" class="mt-4">
+            <button id="lab-params-toggle" type="button" class="lab-params-toggle">
+              <svg class="lab-toggle-chevron" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M7.21 14.77a.75.75 0 01.02-1.06L11.168 10 7.23 6.29a.75.75 0 111.04-1.08l4.5 4.25a.75.75 0 010 1.08l-4.5 4.25a.75.75 0 01-1.06-.02z" clip-rule="evenodd"/></svg>
+              <span class="text-sm font-medium text-gray-300">Tune Parameters</span>
+              <span id="lab-params-badge" class="lab-params-badge hidden">custom</span>
+            </button>
+            <div id="lab-params-panel" class="lab-params-panel hidden">
+              <div id="lab-params-controls" class="space-y-4"></div>
+              <div class="mt-3 flex items-center gap-3">
+                <button id="lab-params-reset" type="button" class="text-xs text-gray-400 hover:text-gray-200 underline underline-offset-2">Reset to defaults</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="mt-4 flex items-center gap-3">
+            <button id="lab-run" class="btn-primary h-10">Run Selected</button>
+            <p id="lab-status" class="text-sm text-gray-400"></p>
+          </div>
+        </div>
+
+        <div id="lab-results-header" class="hidden flex items-center justify-between mb-3">
+          <h3 class="card-title">Results</h3>
+          <button id="lab-clear-all" type="button" class="lab-clear-btn">
+            <svg class="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193V3.75A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z" clip-rule="evenodd"/></svg>
+            Clear All
+          </button>
+        </div>
+        <div id="lab-results" class="lab-player-grid"></div>
       </section>
 
     </main>

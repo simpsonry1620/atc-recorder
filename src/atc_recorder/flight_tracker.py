@@ -70,7 +70,6 @@ class FlightTrack:
     callsign: str
     normalized: str
     legs: list[FlightLeg] = field(default_factory=list)
-    enrichment: Any = None
     total_duration: timedelta = field(default_factory=timedelta)
 
 
@@ -98,10 +97,8 @@ class FlightTracker:
     def __init__(
         self,
         metadata_store: Any,
-        enrichment_service: Any = None,
     ):
         self.metadata_store = metadata_store
-        self.enrichment_service = enrichment_service
 
     def track_flight(self, callsign: str) -> Optional[FlightTrack]:
         """Build a FlightTrack for a given callsign."""
@@ -118,13 +115,6 @@ class FlightTracker:
             first = legs[0].first_heard
             last = legs[-1].last_heard
             track.total_duration = last - first
-
-        if self.enrichment_service:
-            feeds_heard = list({leg.feed_id for leg in legs})
-            enrichment = self.enrichment_service.get_enrichment(callsign)
-            if enrichment:
-                enrichment.feeds_heard = list(set(enrichment.feeds_heard + feeds_heard))
-            track.enrichment = enrichment
 
         return track
 
@@ -235,18 +225,5 @@ def flight_track_to_dict(track: FlightTrack) -> dict:
         "total_duration_seconds": track.total_duration.total_seconds(),
         "feed_count": len({leg.feed_id for leg in track.legs}),
     }
-
-    if track.enrichment:
-        e = track.enrichment
-        result["enrichment"] = {
-            "icao24": e.icao24,
-            "registration": e.registration,
-            "aircraft_type": e.aircraft_type,
-            "origin": e.origin,
-            "destination": e.destination,
-            "last_latitude": e.last_latitude,
-            "last_longitude": e.last_longitude,
-            "last_altitude": e.last_altitude,
-        }
 
     return result

@@ -112,6 +112,25 @@ services:
     command: ["dashboard", "--config", "/app/config.yaml", "--port", "8050"]
     ports:
       - "8050:8050"
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    volumes:
+      - ./recordings:/app/recordings
+      - ./config.yaml:/app/config.yaml:ro
+      - ./credentials.json:/app/credentials.json:ro
+      - ./logs:/app/logs
+      - ${MAXINE_SDK_PATH:-../maxine-afx/Audio_Effects_SDK}:/opt/maxine:ro
+    environment:
+      - TZ=${TZ:-UTC}
+      - ATC_LOG_LEVEL=${ATC_LOG_LEVEL:-INFO}
+      - NGC_API_KEY=${NGC_API_KEY:-}
+      - MAXINE_AUDIO_CLI=/opt/maxine/run_maxine.sh
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8050/api/status"]
       interval: 30s

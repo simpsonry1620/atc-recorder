@@ -3,8 +3,10 @@
 import json
 import os
 import re
+import shutil
 import socket
 import sqlite3
+import time as _time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -478,6 +480,317 @@ def create_app(config: Config) -> FastAPI:
             "text_preview": result.text[:200],
         }
 
+    # ── Audio Lab: preprocessing experiment endpoints ─────────────
+    def _preprocessed_dir() -> Path:
+        trans_cfg = getattr(config, "transcription", None)
+        if trans_cfg and trans_cfg.preprocess_output_dir:
+            p = Path(trans_cfg.preprocess_output_dir)
+            if not p.is_absolute():
+                return recordings / p.name
+            return p
+        return recordings / "preprocessed"
+
+    _ALL_PREPROCESS_METHODS = ["none", "ffmpeg", "ffmpeg_vad", "sox", "maxine"]
+
+    @app.get("/api/preprocess/status")
+    async def preprocess_status():
+        sox_ok = shutil.which("sox") is not None
+        try:
+            from .transcribe import _maxine_available
+            maxine_ok = _maxine_available()
+        except Exception:
+            maxine_ok = False
+        available = ["none", "ffmpeg", "ffmpeg_vad"]
+        if sox_ok:
+            available.append("sox")
+        if maxine_ok:
+            available.append("maxine")
+        return {
+            "available_methods": available,
+            "all_methods": _ALL_PREPROCESS_METHODS,
+            "maxine_available": maxine_ok,
+            "sox_available": sox_ok,
+        }
+
+    _METHODS_LONGEST_FIRST = sorted(_ALL_PREPROCESS_METHODS, key=len, reverse=True)
+
+    def _parse_artifact(stem: str, filepath: Path) -> Optional[dict]:
+        """Parse a preprocessed artifact filename into structured metadata."""
+        name = filepath.stem
+        if not name.startswith(stem + "_"):
+            return None
+        remainder = name[len(stem) + 1:]
+
+        method = None
+        for m in _METHODS_LONGEST_FIRST:
+            if remainder == m or remainder.startswith(m + "_"):
+                method = m
+                break
+        if method is None:
+            return None
+
+        after_method = remainder[len(method):]
+        param_tag = ""
+        if after_method.startswith("_custom_"):
+            param_tag = after_method[len("_custom_"):]
+        elif after_method.startswith("_"):
+            param_tag = after_method[1:]
+
+        try:
+            stat = filepath.stat()
+            mtime = stat.st_mtime
+            size = stat.st_size
+        except OSError:
+            return None
+
+        return {
+            "method": method,
+            "filename": filepath.name,
+            "size_bytes": size,
+            "ext": filepath.suffix,
+            "param_tag": param_tag,
+            "is_custom": bool(param_tag),
+            "mtime": mtime,
+            "mtime_iso": datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    @app.get("/api/preprocess/artifacts")
+    async def preprocess_artifacts(
+        feed_id: str = Query(...),
+        date: str = Query(...),
+        filename: str = Query(...),
+    ):
+        stem = Path(filename).stem
+        artifact_dir = _preprocessed_dir() / feed_id / date
+        artifacts = []
+        if artifact_dir.is_dir():
+            for f in sorted(artifact_dir.iterdir()):
+                if not f.is_file():
+                    continue
+                if f.suffix not in (".wav", ".mp3"):
+                    continue
+                parsed = _parse_artifact(stem, f)
+                if parsed:
+                    artifacts.append(parsed)
+        artifacts.sort(key=lambda a: a["mtime"], reverse=True)
+        return {"original": filename, "artifacts": artifacts}
+
+    @app.delete("/api/preprocess/artifacts")
+    async def delete_preprocess_artifacts(request: Request):
+        body = await request.json()
+        feed_id = str(body.get("feed_id", "")).strip()
+        date = str(body.get("date", "")).strip()
+        filename = str(body.get("filename", "")).strip()
+        target = str(body.get("target", "all")).strip()
+
+        if not feed_id or not date or not filename:
+            raise HTTPException(400, "feed_id, date, and filename are required")
+
+        stem = Path(filename).stem
+        artifact_dir = _preprocessed_dir() / feed_id / date
+        if not artifact_dir.is_dir():
+            return {"deleted": 0}
+
+        deleted = 0
+        if target == "all":
+            for f in list(artifact_dir.iterdir()):
+                if f.is_file() and f.stem.startswith(stem + "_") and f.suffix in (".wav", ".mp3"):
+                    f.unlink()
+                    deleted += 1
+        else:
+            single = artifact_dir / target
+            if single.exists() and single.is_file():
+                single.unlink()
+                deleted = 1
+
+        return {"deleted": deleted}
+
+    _PARAM_SCHEMA = {
+        "ffmpeg": {
+            "highpass_freq":        {"type": int,   "min": 50,   "max": 1000, "default": 300},
+            "lowpass_freq":         {"type": int,   "min": 1000, "max": 8000, "default": 3400},
+            "noise_floor_db":       {"type": int,   "min": -60,  "max": 0,    "default": -25},
+            "dynaudnorm_peak":      {"type": float, "min": 0.1,  "max": 1.0,  "default": 0.9},
+            "dynaudnorm_smoothing": {"type": int,   "min": 1,    "max": 30,   "default": 5},
+        },
+        "ffmpeg_vad": {
+            "highpass_freq":        {"type": int,   "min": 50,   "max": 1000, "default": 300},
+            "lowpass_freq":         {"type": int,   "min": 1000, "max": 8000, "default": 3400},
+            "noise_floor_db":       {"type": int,   "min": -60,  "max": 0,    "default": -20},
+            "dynaudnorm_peak":      {"type": float, "min": 0.1,  "max": 1.0,  "default": 0.9},
+            "dynaudnorm_smoothing": {"type": int,   "min": 1,    "max": 30,   "default": 3},
+            "silence_stop_duration":{"type": float, "min": 0.05, "max": 5.0,  "default": 0.3},
+            "silence_threshold_db": {"type": int,   "min": -60,  "max": 0,    "default": -30},
+            "leave_silence":        {"type": float, "min": 0.0,  "max": 2.0,  "default": 0.1},
+        },
+        "sox": {
+            "noise_sample_duration":{"type": float, "min": 0.1,  "max": 5.0,  "default": 0.5},
+            "noise_reduction":      {"type": float, "min": 0.0,  "max": 1.0,  "default": 0.21},
+            "highpass_freq":        {"type": int,   "min": 50,   "max": 1000, "default": 300},
+            "lowpass_freq":         {"type": int,   "min": 1000, "max": 8000, "default": 3400},
+        },
+        "maxine": {
+            "intensity_ratio":      {"type": float, "min": 0.0,  "max": 1.0,  "default": 1.0},
+            "effect_version":       {"type": int,   "min": 1,    "max": 2,    "default": 1},
+            "enable_vad":           {"type": int,   "min": 0,    "max": 1,    "default": 0},
+            "effect":               {"type": str,   "options": ["denoiser", "dereverb_denoiser"], "default": "denoiser"},
+        },
+    }
+
+    @app.get("/api/preprocess/params")
+    async def preprocess_params():
+        """Return the tunable parameter schema for each method."""
+        schema = {}
+        for method, params in _PARAM_SCHEMA.items():
+            schema[method] = {}
+            for k, v in params.items():
+                entry: dict = {"type": v["type"].__name__, "default": v["default"]}
+                if "options" in v:
+                    entry["options"] = v["options"]
+                else:
+                    entry["min"] = v["min"]
+                    entry["max"] = v["max"]
+                schema[method][k] = entry
+        return {"params": schema}
+
+    def _validate_params(method: str, raw: dict) -> dict:
+        """Validate and coerce user-supplied params against the schema."""
+        schema = _PARAM_SCHEMA.get(method, {})
+        validated = {}
+        for key, value in raw.items():
+            if key not in schema:
+                continue
+            spec = schema[key]
+            if "options" in spec:
+                sval = str(value)
+                if sval in spec["options"]:
+                    validated[key] = sval
+                continue
+            try:
+                coerced = spec["type"](value)
+            except (TypeError, ValueError):
+                continue
+            coerced = max(spec["min"], min(spec["max"], coerced))
+            if key == "enable_vad":
+                validated[key] = bool(coerced)
+            else:
+                validated[key] = coerced
+        return validated
+
+    def _build_artifact_suffix(method: str, params: dict) -> str:
+        """Build a descriptive filename suffix from method params.
+
+        Maxine always gets a descriptive tag so runs are distinguishable.
+        Other methods only get a suffix when params differ from defaults.
+        """
+        if method == "maxine":
+            ir = params.get("intensity_ratio", 1.0)
+            ev = params.get("effect_version", 1)
+            vad = params.get("enable_vad", False)
+            eff = params.get("effect", "denoiser")
+            parts = [f"i{ir}"]
+            if eff != "denoiser":
+                parts.append("derev")
+            parts.append(f"v{ev}")
+            if vad:
+                parts.append("vad")
+            return "_" + "_".join(parts)
+        if not params:
+            return ""
+        tag = "_".join(f"{k}{v}" for k, v in sorted(params.items()))
+        return f"_custom_{tag}"
+
+    @app.post("/api/preprocess/run")
+    async def preprocess_run(request: Request):
+        body = await request.json()
+        feed_id = str(body.get("feed_id", "")).strip()
+        date = str(body.get("date", "")).strip()
+        filename = str(body.get("filename", "")).strip()
+        methods = body.get("methods", [])
+        custom_params: dict = body.get("params", {})
+
+        if not feed_id or not date or not filename:
+            raise HTTPException(400, "feed_id, date, and filename are required")
+        if not methods:
+            raise HTTPException(400, "methods list is required")
+
+        if not filename.endswith(".mp3"):
+            filename = f"{filename}.mp3"
+        audio_path = recordings / feed_id / date / filename
+        if not audio_path.exists():
+            raise HTTPException(404, f"Audio file not found: {filename}")
+
+        try:
+            from .transcribe import (
+                _default_wav_convert,
+                preprocess_audio_ffmpeg,
+                preprocess_audio_ffmpeg_vad,
+                preprocess_audio_sox,
+                preprocess_audio_maxine,
+            )
+        except ImportError as exc:
+            raise HTTPException(503, f"Transcription module not available: {exc}")
+
+        dispatch = {
+            "none": _default_wav_convert,
+            "ffmpeg": preprocess_audio_ffmpeg,
+            "ffmpeg_vad": preprocess_audio_ffmpeg_vad,
+            "sox": preprocess_audio_sox,
+            "maxine": preprocess_audio_maxine,
+        }
+
+        stem = Path(filename).stem
+        out_dir = _preprocessed_dir() / feed_id / date
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+        has_custom = bool(custom_params)
+
+        results = []
+        for method in methods:
+            if method not in dispatch:
+                results.append({"method": method, "success": False, "error": f"Unknown method: {method}"})
+                continue
+
+            method_params = _validate_params(method, custom_params.get(method, {})) if has_custom else {}
+
+            suffix = _build_artifact_suffix(method, method_params)
+            out_path = out_dir / f"{stem}_{method}{suffix}.wav"
+
+            t0 = _time.monotonic()
+            try:
+                ok = dispatch[method](audio_path, out_path, **method_params)
+                elapsed = round(_time.monotonic() - t0, 2)
+                results.append({
+                    "method": method,
+                    "success": ok,
+                    "filename": out_path.name if ok else None,
+                    "size_bytes": out_path.stat().st_size if ok and out_path.exists() else 0,
+                    "elapsed_seconds": elapsed,
+                    "params_applied": method_params or None,
+                    "error": None if ok else f"{method} preprocessing failed",
+                })
+            except Exception as exc:
+                elapsed = round(_time.monotonic() - t0, 2)
+                results.append({
+                    "method": method,
+                    "success": False,
+                    "error": str(exc),
+                    "elapsed_seconds": elapsed,
+                })
+
+        return {"audio_file": filename, "results": results}
+
+    @app.get("/api/preprocessed/{feed_id}/{date}/{filename}")
+    async def get_preprocessed_audio(feed_id: str, date: str, filename: str):
+        path = _preprocessed_dir() / feed_id / date / filename
+        if not path.exists():
+            raise HTTPException(404, "Preprocessed audio file not found")
+        if path.suffix == ".mp3":
+            media = "audio/mpeg"
+        else:
+            media = "audio/wav"
+        return FileResponse(path, media_type=media, filename=filename)
+
     # ── Semantic search (proxied) ───────────────────────────────────
     @app.post("/api/search")
     async def search(request: Request):
@@ -700,22 +1013,8 @@ def create_app(config: Config) -> FastAPI:
         store = _get_metadata_store()
         if not store:
             return None
-        enrichment_svc = None
-        tracking = getattr(config, "tracking", None)
-        if tracking and tracking.opensky.enabled:
-            from .opensky import OpenSkyEnrichmentService
-            osky = tracking.opensky
-            enrichment_svc = OpenSkyEnrichmentService(
-                db_path=Path(tracking.enrichment_db_path),
-                credentials_file=Path(osky.credentials_file),
-                cache_ttl=osky.cache_ttl_seconds,
-                bbox={
-                    "lamin": osky.bbox_lamin, "lamax": osky.bbox_lamax,
-                    "lomin": osky.bbox_lomin, "lomax": osky.bbox_lomax,
-                },
-            )
         from .flight_tracker import FlightTracker
-        return FlightTracker(metadata_store=store, enrichment_service=enrichment_svc)
+        return FlightTracker(metadata_store=store)
 
     @app.get("/api/flights/recent")
     async def recent_flights(limit: int = Query(50, ge=1, le=200)):

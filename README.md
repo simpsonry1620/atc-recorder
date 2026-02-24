@@ -94,11 +94,21 @@ atc-recorder check
 
 ## Configuration
 
+`config.yaml` is optional. If it is not present, the app uses built-in defaults.
+
+Configuration precedence (highest to lowest):
+1. CLI `--config` path (for commands that accept it)
+2. `config.yaml` in the current working directory
+3. Built-in defaults
+4. Environment variables for specific runtime overrides (for example gRPC hosts/ports and API keys)
+
 Create a `config.yaml` file:
 
 ```yaml
 output_dir: ./recordings
 segment_duration: 1800  # 30 minutes in seconds
+request_delay: 1.0
+user_agent: ATC-Recorder/0.1.0
 
 feeds:
   - kdca1_gnd
@@ -112,6 +122,8 @@ recording:
 
 transcription:
   preprocess: ffmpeg_vad
+  preprocess_output_dir: ./recordings/preprocessed
+  keep_preprocessed_audio: false
   segment_by_pauses: false
   min_silence_duration: 0.5
   silence_threshold_dB: -30
@@ -123,6 +135,19 @@ transcription:
   stitch_across_files: false
   stitch_max_gap_seconds: 2.0
   stitch_min_text_overlap_chars: 12
+  variant_store_path: ./recordings/transcripts.db
+
+rag:
+  enabled: true
+  ingest_on_transcribe: true
+  embedding:
+    endpoint: http://embedding-nim:8000/v1/embeddings
+    api_key_env: NGC_API_KEY
+
+tracking:
+  entity_extraction:
+    enabled: true
+    min_confidence: 0.5
 ```
 
 ## Output Structure
@@ -139,6 +164,13 @@ recordings/
 ## Docker
 
 The application is fully containerized with health checks, logging, and multiple service profiles.
+
+### Run Tests (Container)
+
+```bash
+docker compose run --rm --entrypoint sh -v "$(pwd):/app" atc-recorder -lc \
+  "cd /app && python -m pip install --no-cache-dir pytest pytest-cov && python -m pytest -q -o cache_dir=/tmp/pytest-cache"
+```
 
 ### Quick Start
 
@@ -173,6 +205,31 @@ You can also run it non-interactively with flags:
 
 ```bash
 ./scripts/launch_app.sh --build yes --dashboard yes --whisper yes --parakeet no --rag no --workers yes --non-interactive
+```
+
+### Dashboard Access
+
+The web dashboard is exposed on port `8050` by default.
+
+Dashboard host/port are controlled by CLI arguments, not `config.yaml`:
+
+```bash
+atc-recorder dashboard --host 0.0.0.0 --port 8050
+```
+
+In Docker Compose, the dashboard service runs:
+
+```bash
+docker compose up -d atc-dashboard
+```
+
+- Local machine: `http://localhost:8050`
+- External access: `http://<server-ip>:8050`
+
+Quick health check:
+
+```bash
+curl -s "http://localhost:8050/api/status"
 ```
 
 ### Running as a Daemon
@@ -210,6 +267,7 @@ The project supports two NVIDIA NIM ASR workflows for transcription:
 - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
 - NGC API Key from [NVIDIA Build](https://build.nvidia.com/openai/whisper-large-v3)
 - `sox` (optional, for `transcribe-compare` sox preprocessing method)
+- NVIDIA Maxine Audio Effects runtime (optional, for `--preprocess maxine`)
 
 #### Setup
 
@@ -256,6 +314,9 @@ docker compose --profile asr run --rm transcription-worker transcribe recordings
 
 # Segment by pauses (one segment per utterance) and write timestamped .txt
 docker compose --profile asr run --rm transcription-worker transcribe --segment-by-pauses --output-format timestamped-txt recordings/.../file.mp3
+
+# Use NVIDIA Maxine preprocessing (falls back to ffmpeg_vad if unavailable)
+docker compose --profile asr run --rm transcription-worker transcribe --preprocess maxine recordings/.../file.mp3
 
 # Add role diarization labels and stitch boundary transmissions
 docker compose --profile asr run --rm transcription-worker transcribe --segment-by-pauses --diarization --stitch-across-files recordings/.../file.mp3
@@ -331,7 +392,19 @@ docker compose --profile asr run --rm transcription-worker transcribe recordings
 docker compose --profile asr-parakeet run --rm parakeet-transcription-worker transcribe recordings/.../file.mp3
 ```
 
-This creates multiple transcript files (for example `*_transcript_none.json`, `*_transcript_ffmpeg.json`, and `*_transcript_ffmpeg_vad.json`; `*_transcript_sox.json` is included when `sox` is available) so you can compare recognition quality.
+This creates multiple transcript files (for example `*_transcript_none.json`, `*_transcript_ffmpeg.json`, and `*_transcript_ffmpeg_vad.json`; `*_transcript_sox.json` is included when `sox` is available, and `*_transcript_maxine.json` is included when Maxine runtime is available) so you can compare recognition quality.
+
+To retain preprocessed WAV artifacts, set:
+
+```yaml
+transcription:
+  preprocess_output_dir: ./recordings/preprocessed
+  keep_preprocessed_audio: true
+```
+
+Maxine runtime integration uses one of:
+- `MAXINE_AUDIO_CMD_TEMPLATE` (recommended), for example: `my-maxine-wrapper --in {input} --out {output}`
+- `MAXINE_AUDIO_CLI` (default command name: `maxine_audio_fx`)
 
 #### Output
 
@@ -472,13 +545,24 @@ cp .env.example .env
 Available environment variables:
 - `TZ`: Timezone (default: UTC)
 - `ATC_LOG_LEVEL`: Logging level - DEBUG, INFO, WARNING, ERROR (default: INFO)
-- `NGC_API_KEY`: NVIDIA NGC API key (used for both Whisper ASR and local NIM Retriever)
-- `NIM_RETRIEVER_IMAGE`: Retriever container image tag (default in `.env.example`)
+- `COMPOSE_PROJECT_NAME`: Optional Docker Compose project name
+- `NGC_API_KEY`: NVIDIA NGC API key (used by ASR and Retriever services)
+- `WHISPER_GRPC_HOST`: Whisper gRPC host (default: whisper-asr)
+- `WHISPER_GRPC_PORT`: Whisper gRPC port (default: 50051)
+- `PARAKEET_GRPC_HOST`: Parakeet gRPC host (default: parakeet-asr)
+- `PARAKEET_GRPC_PORT`: Parakeet gRPC port (default: 50051)
+- `NIM_WHISPER_IMAGE`: Whisper container image tag
+- `NIM_WHISPER_TAGS_SELECTOR`: Optional Whisper model selector
+- `NIM_PARAKEET_IMAGE`: Parakeet container image tag
+- `NIM_PARAKEET_TAGS_SELECTOR`: Optional Parakeet model selector
+- `NIM_PARAKEET_HOST_HTTP_PORT`: Parakeet HTTP host port (default: `9001`)
+- `NIM_PARAKEET_HOST_GRPC_PORT`: Parakeet gRPC host port (default: `50052`)
+- `NIM_RETRIEVER_IMAGE`: Retriever container image tag
 - `NIM_RETRIEVER_HTTP_PORT`: Internal Retriever HTTP port (default: `8000`)
 - `NIM_RETRIEVER_HOST_PORT`: Host port mapped to Retriever HTTP port (default: `9080`)
 - `NIM_RETRIEVER_TAGS_SELECTOR`: Optional Retriever model selector
-- `WHISPER_GRPC_HOST`: Whisper gRPC host (default: whisper-asr)
-- `WHISPER_GRPC_PORT`: Whisper gRPC port (default: 50051)
+
+`rag.embedding.api_key_env` in `config.yaml` controls which environment variable name is read for the embedding API key (default: `NGC_API_KEY`).
 
 ### Manual Docker Build
 
