@@ -67,32 +67,63 @@ ICAO_TO_AIRLINE: dict[str, str] = {v: k for k, v in AIRLINE_CALLSIGN_MAP.items()
 
 # NATO phonetic alphabet -> letter
 _PHONETIC_MAP: dict[str, str] = {
-    "alpha": "A", "alfa": "A", "bravo": "B", "charlie": "C",
-    "delta": "D", "echo": "E", "foxtrot": "F", "golf": "G",
-    "hotel": "H", "india": "I", "juliet": "J", "juliett": "J",
-    "kilo": "K", "lima": "L", "mike": "M", "november": "N",
-    "oscar": "O", "papa": "P", "quebec": "Q", "romeo": "R",
-    "sierra": "S", "tango": "T", "uniform": "U", "victor": "V",
-    "whiskey": "W", "xray": "X", "x-ray": "X", "yankee": "Y", "zulu": "Z",
+    "alpha": "A",
+    "alfa": "A",
+    "bravo": "B",
+    "charlie": "C",
+    "delta": "D",
+    "echo": "E",
+    "foxtrot": "F",
+    "golf": "G",
+    "hotel": "H",
+    "india": "I",
+    "juliet": "J",
+    "juliett": "J",
+    "kilo": "K",
+    "lima": "L",
+    "mike": "M",
+    "november": "N",
+    "oscar": "O",
+    "papa": "P",
+    "quebec": "Q",
+    "romeo": "R",
+    "sierra": "S",
+    "tango": "T",
+    "uniform": "U",
+    "victor": "V",
+    "whiskey": "W",
+    "xray": "X",
+    "x-ray": "X",
+    "yankee": "Y",
+    "zulu": "Z",
 }
 
 # Spoken number words -> digit
 _SPOKEN_DIGIT_MAP: dict[str, str] = {
-    "zero": "0", "oh": "0",
-    "one": "1", "wun": "1",
+    "zero": "0",
+    "oh": "0",
+    "one": "1",
+    "wun": "1",
     "two": "2",
-    "three": "3", "tree": "3",
-    "four": "4", "fower": "4",
-    "five": "5", "fife": "5",
+    "three": "3",
+    "tree": "3",
+    "four": "4",
+    "fower": "4",
+    "five": "5",
+    "fife": "5",
     "six": "6",
     "seven": "7",
-    "eight": "8", "ait": "8",
-    "nine": "9", "niner": "9",
+    "eight": "8",
+    "ait": "8",
+    "nine": "9",
+    "niner": "9",
 }
 
 # Common runway designators
 _RUNWAY_SUFFIX_MAP: dict[str, str] = {
-    "left": "L", "right": "R", "center": "C",
+    "left": "L",
+    "right": "R",
+    "center": "C",
 }
 
 
@@ -147,15 +178,12 @@ _AIRLINE_SPOKEN_RE = re.compile(
 
 # Airline callsign with numeric digits: "Delta 1234"
 _AIRLINE_NUMERIC_RE = re.compile(
-    rf"\b({_AIRLINE_NAMES_PATTERN})\s+(\d{{1,5}}[A-Za-z]?)"
-    r"(?:\s+(?:heavy|super))?\b",
+    rf"\b({_AIRLINE_NAMES_PATTERN})\s+(\d{{1,5}}[A-Za-z]?)" r"(?:\s+(?:heavy|super))?\b",
     re.IGNORECASE,
 )
 
 # ICAO 3-letter + number: "DAL1234" or "DAL 1234"
-_ICAO_RE = re.compile(
-    r"\b([A-Z]{3})\s?(\d{1,5}[A-Z]?)\b"
-)
+_ICAO_RE = re.compile(r"\b([A-Z]{3})\s?(\d{1,5}[A-Z]?)\b")
 
 # GA/N-number: "N123AB" or "November 1 2 3 Alpha Bravo"
 _NNUMBER_RE = re.compile(r"\b(N\d{1,5}[A-Z]{0,2})\b", re.IGNORECASE)
@@ -217,19 +245,19 @@ def _extract_airline_callsigns(text: str) -> list[EntityMention]:
         flight_num = m.group(2).upper()
         icao = AIRLINE_CALLSIGN_MAP.get(airline_name, airline_name[:3].upper())
         normalized = f"{icao}{flight_num}"
-        mentions.append(EntityMention(
-            entity_type="callsign",
-            raw_text=m.group(0).strip(),
-            normalized=normalized,
-            confidence=0.90,
-            start_offset=m.start(),
-            end_offset=m.end(),
-        ))
+        mentions.append(
+            EntityMention(
+                entity_type="callsign",
+                raw_text=m.group(0).strip(),
+                normalized=normalized,
+                confidence=0.90,
+                start_offset=m.start(),
+                end_offset=m.end(),
+            )
+        )
 
     for m in _AIRLINE_SPOKEN_RE.finditer(text):
-        already_covered = any(
-            em.start_offset <= m.start() < em.end_offset for em in mentions
-        )
+        already_covered = any(em.start_offset <= m.start() < em.end_offset for em in mentions)
         if already_covered:
             continue
         airline_name = m.group(1).lower()
@@ -238,14 +266,16 @@ def _extract_airline_callsigns(text: str) -> list[EntityMention]:
             continue
         icao = AIRLINE_CALLSIGN_MAP.get(airline_name, airline_name[:3].upper())
         normalized = f"{icao}{digits}"
-        mentions.append(EntityMention(
-            entity_type="callsign",
-            raw_text=m.group(0).strip(),
-            normalized=normalized,
-            confidence=0.75,
-            start_offset=m.start(),
-            end_offset=m.end(),
-        ))
+        mentions.append(
+            EntityMention(
+                entity_type="callsign",
+                raw_text=m.group(0).strip(),
+                normalized=normalized,
+                confidence=0.75,
+                start_offset=m.start(),
+                end_offset=m.end(),
+            )
+        )
 
     return mentions
 
@@ -259,14 +289,16 @@ def _extract_icao_callsigns(text: str) -> list[EntityMention]:
             continue
         num = m.group(2)
         normalized = f"{code}{num}"
-        mentions.append(EntityMention(
-            entity_type="callsign",
-            raw_text=m.group(0),
-            normalized=normalized,
-            confidence=0.95,
-            start_offset=m.start(),
-            end_offset=m.end(),
-        ))
+        mentions.append(
+            EntityMention(
+                entity_type="callsign",
+                raw_text=m.group(0),
+                normalized=normalized,
+                confidence=0.95,
+                start_offset=m.start(),
+                end_offset=m.end(),
+            )
+        )
     return mentions
 
 
@@ -276,14 +308,16 @@ def _extract_ga_callsigns(text: str) -> list[EntityMention]:
 
     for m in _NNUMBER_RE.finditer(text):
         raw = m.group(1).upper()
-        mentions.append(EntityMention(
-            entity_type="callsign",
-            raw_text=m.group(0),
-            normalized=raw,
-            confidence=0.85,
-            start_offset=m.start(),
-            end_offset=m.end(),
-        ))
+        mentions.append(
+            EntityMention(
+                entity_type="callsign",
+                raw_text=m.group(0),
+                normalized=raw,
+                confidence=0.85,
+                start_offset=m.start(),
+                end_offset=m.end(),
+            )
+        )
 
     for m in _GA_PHONETIC_RE.finditer(text):
         already = any(em.start_offset <= m.start() < em.end_offset for em in mentions)
@@ -294,14 +328,16 @@ def _extract_ga_callsigns(text: str) -> list[EntityMention]:
         if not digits:
             continue
         normalized = f"N{digits}{letters}"
-        mentions.append(EntityMention(
-            entity_type="callsign",
-            raw_text=m.group(0).strip(),
-            normalized=normalized,
-            confidence=0.70,
-            start_offset=m.start(),
-            end_offset=m.end(),
-        ))
+        mentions.append(
+            EntityMention(
+                entity_type="callsign",
+                raw_text=m.group(0).strip(),
+                normalized=normalized,
+                confidence=0.70,
+                start_offset=m.start(),
+                end_offset=m.end(),
+            )
+        )
 
     return mentions
 
@@ -315,14 +351,16 @@ def _extract_runways(text: str) -> list[EntityMention]:
         suffix_raw = (m.group(2) or "").strip().lower()
         suffix = _RUNWAY_SUFFIX_MAP.get(suffix_raw, suffix_raw.upper())
         normalized = f"RWY{num}{suffix}"
-        mentions.append(EntityMention(
-            entity_type="runway",
-            raw_text=m.group(0).strip(),
-            normalized=normalized,
-            confidence=0.90,
-            start_offset=m.start(),
-            end_offset=m.end(),
-        ))
+        mentions.append(
+            EntityMention(
+                entity_type="runway",
+                raw_text=m.group(0).strip(),
+                normalized=normalized,
+                confidence=0.90,
+                start_offset=m.start(),
+                end_offset=m.end(),
+            )
+        )
 
     for m in _RUNWAY_RE.finditer(text):
         already = any(em.start_offset <= m.start() < em.end_offset for em in mentions)
@@ -334,14 +372,16 @@ def _extract_runways(text: str) -> list[EntityMention]:
         suffix_raw = (m.group(2) or "").strip().lower()
         suffix = _RUNWAY_SUFFIX_MAP.get(suffix_raw, suffix_raw.upper())
         normalized = f"RWY{digits}{suffix}"
-        mentions.append(EntityMention(
-            entity_type="runway",
-            raw_text=m.group(0).strip(),
-            normalized=normalized,
-            confidence=0.80,
-            start_offset=m.start(),
-            end_offset=m.end(),
-        ))
+        mentions.append(
+            EntityMention(
+                entity_type="runway",
+                raw_text=m.group(0).strip(),
+                normalized=normalized,
+                confidence=0.80,
+                start_offset=m.start(),
+                end_offset=m.end(),
+            )
+        )
 
     return mentions
 
@@ -355,28 +395,32 @@ def _extract_altitudes(text: str) -> list[EntityMention]:
         if not digits:
             continue
         normalized = f"FL{digits}"
-        mentions.append(EntityMention(
-            entity_type="altitude",
-            raw_text=m.group(0).strip(),
-            normalized=normalized,
-            confidence=0.85,
-            start_offset=m.start(),
-            end_offset=m.end(),
-        ))
+        mentions.append(
+            EntityMention(
+                entity_type="altitude",
+                raw_text=m.group(0).strip(),
+                normalized=normalized,
+                confidence=0.85,
+                start_offset=m.start(),
+                end_offset=m.end(),
+            )
+        )
 
     for m in _ALTITUDE_THOUSAND_RE.finditer(text):
         thousands = int(m.group(1))
         hundreds = int(m.group(2)) if m.group(2) else 0
         alt = thousands * 1000 + hundreds * 100
         normalized = f"{alt}FT"
-        mentions.append(EntityMention(
-            entity_type="altitude",
-            raw_text=m.group(0).strip(),
-            normalized=normalized,
-            confidence=0.80,
-            start_offset=m.start(),
-            end_offset=m.end(),
-        ))
+        mentions.append(
+            EntityMention(
+                entity_type="altitude",
+                raw_text=m.group(0).strip(),
+                normalized=normalized,
+                confidence=0.80,
+                start_offset=m.start(),
+                end_offset=m.end(),
+            )
+        )
 
     return mentions
 
@@ -389,14 +433,16 @@ def _extract_frequencies(text: str) -> list[EntityMention]:
         whole = m.group(2)
         decimal = m.group(3)
         normalized = f"{whole}.{decimal}"
-        mentions.append(EntityMention(
-            entity_type="frequency",
-            raw_text=m.group(0).strip(),
-            normalized=normalized,
-            confidence=0.85,
-            start_offset=m.start(),
-            end_offset=m.end(),
-        ))
+        mentions.append(
+            EntityMention(
+                entity_type="frequency",
+                raw_text=m.group(0).strip(),
+                normalized=normalized,
+                confidence=0.85,
+                start_offset=m.start(),
+                end_offset=m.end(),
+            )
+        )
 
     for m in _FREQ_RE.finditer(text):
         already = any(em.start_offset <= m.start() < em.end_offset for em in mentions)
@@ -408,14 +454,16 @@ def _extract_frequencies(text: str) -> list[EntityMention]:
         if not (118.0 <= freq_val <= 137.0):
             continue
         normalized = f"{whole}.{decimal}"
-        mentions.append(EntityMention(
-            entity_type="frequency",
-            raw_text=m.group(0).strip(),
-            normalized=normalized,
-            confidence=0.75,
-            start_offset=m.start(),
-            end_offset=m.end(),
-        ))
+        mentions.append(
+            EntityMention(
+                entity_type="frequency",
+                raw_text=m.group(0).strip(),
+                normalized=normalized,
+                confidence=0.75,
+                start_offset=m.start(),
+                end_offset=m.end(),
+            )
+        )
 
     return mentions
 

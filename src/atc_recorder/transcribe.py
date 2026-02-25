@@ -15,7 +15,6 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Callable
 
-from .config import Config
 from .logging import get_logger
 
 if TYPE_CHECKING:
@@ -45,7 +44,9 @@ _PILOT_ROLE_PATTERNS = [
 ]
 
 
-def _stable_stitch_group_id(left_audio: str, right_audio: str, left_idx: int, right_idx: int) -> str:
+def _stable_stitch_group_id(
+    left_audio: str, right_audio: str, left_idx: int, right_idx: int
+) -> str:
     raw = f"{left_audio}:{left_idx}->{right_audio}:{right_idx}"
     return "stitch_" + hashlib.sha1(raw.encode("utf-8")).hexdigest()[:12]
 
@@ -103,7 +104,9 @@ def apply_role_diarization(
     return segments
 
 
-def _merge_boundary_text(previous_text: str, current_text: str, min_overlap_chars: int) -> tuple[str, int]:
+def _merge_boundary_text(
+    previous_text: str, current_text: str, min_overlap_chars: int
+) -> tuple[str, int]:
     """Merge boundary text while removing duplicated overlap suffix/prefix."""
     left = _clean_text(previous_text)
     right = _clean_text(current_text)
@@ -146,7 +149,9 @@ def _resolve_audio_start_time(transcript_path: Path, audio_file_name: str) -> Op
     metadata_entry = _find_metadata_entry(transcript_path.parent / "metadata.json", audio_file_name)
     if metadata_entry and metadata_entry.get("start_time"):
         try:
-            return datetime.fromisoformat(str(metadata_entry["start_time"]).replace("Z", "+00:00")).astimezone(timezone.utc)
+            return datetime.fromisoformat(
+                str(metadata_entry["start_time"]).replace("Z", "+00:00")
+            ).astimezone(timezone.utc)
         except Exception:
             pass
 
@@ -156,7 +161,9 @@ def _resolve_audio_start_time(transcript_path: Path, audio_file_name: str) -> Op
         date_part = pieces[-2]
         time_part = pieces[-1].rstrip("Z")
         try:
-            return datetime.strptime(f"{date_part} {time_part}", "%Y-%m-%d %H%M").replace(tzinfo=timezone.utc)
+            return datetime.strptime(f"{date_part} {time_part}", "%Y-%m-%d %H%M").replace(
+                tzinfo=timezone.utc
+            )
         except ValueError:
             return None
     return None
@@ -184,12 +191,12 @@ def _ordered_transcript_audio_pairs(directory: Path) -> list[tuple[Path, str]]:
 
 class AudioPreprocess(Enum):
     """Audio preprocessing methods for noise reduction."""
-    
-    NONE = "none"           # No preprocessing
-    FFMPEG = "ffmpeg"       # FFmpeg filters (highpass, lowpass, afftdn, dynaudnorm)
+
+    NONE = "none"  # No preprocessing
+    FFMPEG = "ffmpeg"  # FFmpeg filters (highpass, lowpass, afftdn, dynaudnorm)
     FFMPEG_VAD = "ffmpeg_vad"  # FFmpeg with VAD to remove static/silence
-    SOX = "sox"             # Sox noisered with auto noise profile
-    MAXINE = "maxine"       # NVIDIA Maxine Audio Effects via local CLI wrapper
+    SOX = "sox"  # Sox noisered with auto noise profile
+    MAXINE = "maxine"  # NVIDIA Maxine Audio Effects via local CLI wrapper
 
 
 def _default_wav_convert(input_path: Path, output_path: Path) -> bool:
@@ -197,11 +204,16 @@ def _default_wav_convert(input_path: Path, output_path: Path) -> bool:
     cmd = [
         "ffmpeg",
         "-y",
-        "-i", str(input_path),
-        "-ac", "1",
-        "-ar", "16000",
-        "-sample_fmt", "s16",
-        "-f", "wav",
+        "-i",
+        str(input_path),
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-sample_fmt",
+        "s16",
+        "-f",
+        "wav",
         str(output_path),
     ]
     try:
@@ -234,10 +246,16 @@ def _convert_to_maxine_wav(input_path: Path, output_path: Path) -> bool:
 
     try:
         cmd = [
-            "ffmpeg", "-y",
-            "-i", str(input_path),
-            "-ac", "1", "-ar", "16000",
-            "-f", "f32le",
+            "ffmpeg",
+            "-y",
+            "-i",
+            str(input_path),
+            "-ac",
+            "1",
+            "-ar",
+            "16000",
+            "-f",
+            "f32le",
             str(raw_path),
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
@@ -357,9 +375,7 @@ def preprocess_audio_maxine(
     overridden for experimentation.
     """
     if not _maxine_available():
-        logger.warning(
-            "Maxine CLI not found. Set MAXINE_AUDIO_CLI or MAXINE_AUDIO_CMD_TEMPLATE."
-        )
+        logger.warning("Maxine CLI not found. Set MAXINE_AUDIO_CLI or MAXINE_AUDIO_CMD_TEMPLATE.")
         return False
 
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -410,7 +426,7 @@ def preprocess_audio_ffmpeg(
     dynaudnorm_smoothing: int = 5,
 ) -> bool:
     """Apply ffmpeg-based audio preprocessing for ATC radio.
-    
+
     Uses bandpass filtering, FFT-based noise reduction, and dynamic normalization.
     All filter parameters can be overridden for experimentation.
     """
@@ -420,19 +436,25 @@ def preprocess_audio_ffmpeg(
         f"afftdn=nf={noise_floor_db}",
         f"dynaudnorm=p={dynaudnorm_peak}:s={dynaudnorm_smoothing}",
     ]
-    
+
     cmd = [
         "ffmpeg",
         "-y",
-        "-i", str(input_path),
-        "-af", ",".join(filters),
-        "-ac", "1",
-        "-ar", "16000",
-        "-sample_fmt", "s16",
-        "-f", "wav",
+        "-i",
+        str(input_path),
+        "-af",
+        ",".join(filters),
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-sample_fmt",
+        "s16",
+        "-f",
+        "wav",
         str(output_path),
     ]
-    
+
     try:
         result = subprocess.run(
             cmd,
@@ -440,12 +462,12 @@ def preprocess_audio_ffmpeg(
             text=True,
             timeout=300,
         )
-        
+
         if result.returncode != 0:
             logger.error(f"ffmpeg preprocessing failed: {result.stderr[:500]}")
             return False
         return True
-        
+
     except Exception as e:
         logger.error(f"ffmpeg preprocessing error: {e}")
         return False
@@ -465,7 +487,7 @@ def preprocess_audio_ffmpeg_vad(
     dynaudnorm_smoothing: int = 3,
 ) -> bool:
     """Apply ffmpeg preprocessing with Voice Activity Detection.
-    
+
     Applies noise reduction, then uses silenceremove to strip static/silence
     sections that cause Whisper to hallucinate. All parameters can be
     overridden for experimentation.
@@ -478,19 +500,25 @@ def preprocess_audio_ffmpeg_vad(
         f":stop_threshold={silence_threshold_db}dB:leave_silence={leave_silence}",
         f"dynaudnorm=p={dynaudnorm_peak}:s={dynaudnorm_smoothing}",
     ]
-    
+
     cmd = [
         "ffmpeg",
         "-y",
-        "-i", str(input_path),
-        "-af", ",".join(filters),
-        "-ac", "1",
-        "-ar", "16000",
-        "-sample_fmt", "s16",
-        "-f", "wav",
+        "-i",
+        str(input_path),
+        "-af",
+        ",".join(filters),
+        "-ac",
+        "1",
+        "-ar",
+        "16000",
+        "-sample_fmt",
+        "s16",
+        "-f",
+        "wav",
         str(output_path),
     ]
-    
+
     try:
         result = subprocess.run(
             cmd,
@@ -498,16 +526,16 @@ def preprocess_audio_ffmpeg_vad(
             text=True,
             timeout=300,
         )
-        
+
         if result.returncode != 0:
             logger.error(f"ffmpeg VAD preprocessing failed: {result.stderr[:500]}")
             return False
-        
+
         if output_path.stat().st_size < 1000:
             logger.warning("VAD removed most audio - file may be mostly static")
-        
+
         return True
-        
+
     except Exception as e:
         logger.error(f"ffmpeg VAD preprocessing error: {e}")
         return False
@@ -523,7 +551,7 @@ def preprocess_audio_sox(
     lowpass_freq: int = 3400,
 ) -> bool:
     """Apply sox-based audio preprocessing with automatic noise profiling.
-    
+
     Uses an initial segment of audio to build a noise profile, then applies
     noise reduction along with bandpass filtering. All parameters can be
     overridden for experimentation.
@@ -533,21 +561,25 @@ def preprocess_audio_sox(
         noise_sample = tmpdir / "noise_sample.wav"
         noise_profile = tmpdir / "noise.prof"
         intermediate = tmpdir / "intermediate.wav"
-        
+
         try:
             cmd_extract = [
                 "sox",
                 str(input_path),
                 str(noise_sample),
-                "trim", "0", str(noise_sample_duration),
-                "rate", "16000",
-                "channels", "1",
+                "trim",
+                "0",
+                str(noise_sample_duration),
+                "rate",
+                "16000",
+                "channels",
+                "1",
             ]
             result = subprocess.run(cmd_extract, capture_output=True, text=True, timeout=60)
             if result.returncode != 0:
                 logger.error(f"Sox noise sample extraction failed: {result.stderr[:300]}")
                 return False
-            
+
             cmd_profile = [
                 "sox",
                 str(noise_sample),
@@ -559,40 +591,51 @@ def preprocess_audio_sox(
             if result.returncode != 0:
                 logger.error(f"Sox noise profile failed: {result.stderr[:300]}")
                 return False
-            
+
             cmd_reduce = [
                 "sox",
                 str(input_path),
                 str(intermediate),
-                "rate", "16000",
-                "channels", "1",
-                "noisered", str(noise_profile), str(noise_reduction),
-                "highpass", str(highpass_freq),
-                "lowpass", str(lowpass_freq),
+                "rate",
+                "16000",
+                "channels",
+                "1",
+                "noisered",
+                str(noise_profile),
+                str(noise_reduction),
+                "highpass",
+                str(highpass_freq),
+                "lowpass",
+                str(lowpass_freq),
                 "norm",
             ]
             result = subprocess.run(cmd_reduce, capture_output=True, text=True, timeout=300)
             if result.returncode != 0:
                 logger.error(f"Sox noise reduction failed: {result.stderr[:300]}")
                 return False
-            
+
             cmd_convert = [
                 "ffmpeg",
                 "-y",
-                "-i", str(intermediate),
-                "-ac", "1",
-                "-ar", "16000",
-                "-sample_fmt", "s16",
-                "-f", "wav",
+                "-i",
+                str(intermediate),
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                "-sample_fmt",
+                "s16",
+                "-f",
+                "wav",
                 str(output_path),
             ]
             result = subprocess.run(cmd_convert, capture_output=True, text=True, timeout=60)
             if result.returncode != 0:
                 logger.error(f"Final conversion failed: {result.stderr[:300]}")
                 return False
-            
+
             return True
-            
+
         except Exception as e:
             logger.error(f"Sox preprocessing error: {e}")
             return False
@@ -619,9 +662,12 @@ def detect_silence_intervals(
     # silencedetect=n=-30dB:d=0.5 -> noise threshold -30dB, min duration 0.5s
     cmd = [
         "ffmpeg",
-        "-i", str(wav_path),
-        "-af", f"silencedetect=n={silence_threshold_dB}dB:d={min_silence_duration}",
-        "-f", "null",
+        "-i",
+        str(wav_path),
+        "-af",
+        f"silencedetect=n={silence_threshold_dB}dB:d={min_silence_duration}",
+        "-f",
+        "null",
         "-",
     ]
     try:
@@ -711,9 +757,12 @@ def _get_wav_duration(wav_path: Path) -> float:
     try:
         cmd = [
             "ffprobe",
-            "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
             str(wav_path),
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -727,6 +776,7 @@ def _get_wav_duration(wav_path: Path) -> float:
 try:
     import riva.client
     from riva.client.auth import Auth
+
     RIVA_AVAILABLE = True
 except ImportError:
     RIVA_AVAILABLE = False
@@ -735,6 +785,7 @@ except ImportError:
 try:
     from watchdog.observers import Observer
     from watchdog.events import FileSystemEventHandler, FileCreatedEvent
+
     WATCHDOG_AVAILABLE = True
 except ImportError:
     WATCHDOG_AVAILABLE = False
@@ -744,7 +795,7 @@ except ImportError:
 @dataclass
 class TranscriptionResult:
     """Result of a transcription operation."""
-    
+
     success: bool
     audio_file: Path
     transcript_file: Optional[Path] = None
@@ -761,7 +812,7 @@ class TranscriptionResult:
 
 class WhisperClient:
     """Client for NVIDIA Whisper ASR via Riva gRPC."""
-    
+
     def __init__(
         self,
         grpc_host: str = "localhost",
@@ -769,7 +820,7 @@ class WhisperClient:
         language_code: str = "en-US",
     ):
         """Initialize the Whisper client.
-        
+
         Args:
             grpc_host: Hostname of the Whisper gRPC service
             grpc_port: Port of the Whisper gRPC service
@@ -780,38 +831,38 @@ class WhisperClient:
                 "nvidia-riva-client is not installed. "
                 "Install with: pip install nvidia-riva-client"
             )
-        
+
         self.grpc_host = grpc_host
         self.grpc_port = grpc_port
         self.language_code = language_code
         self._auth = None
         self._asr_service = None
-    
+
     @property
     def server_uri(self) -> str:
         """Get the server URI."""
         return f"{self.grpc_host}:{self.grpc_port}"
-    
+
     def _get_auth(self) -> "Auth":
         """Get or create the authentication object."""
         if self._auth is None:
             self._auth = Auth(uri=self.server_uri, use_ssl=False)
         return self._auth
-    
+
     def _get_asr_service(self) -> "riva.client.ASRService":
         """Get or create the ASR service client."""
         if self._asr_service is None:
             self._asr_service = riva.client.ASRService(self._get_auth())
         return self._asr_service
-    
+
     def check_connection(self) -> bool:
         """Check if the Whisper service is available.
-        
+
         Returns:
             True if the service is healthy, False otherwise
         """
         import grpc
-        
+
         try:
             # Try to create a connection
             channel = grpc.insecure_channel(self.server_uri)
@@ -822,36 +873,36 @@ class WhisperClient:
         except Exception as e:
             logger.debug(f"Connection check failed: {e}")
             return False
-    
+
     def transcribe_file(self, audio_path: Path) -> TranscriptionResult:
         """Transcribe an audio file.
-        
+
         The file must be in WAV format (mono, 16-bit).
         For MP3 files, use convert_and_transcribe() instead.
-        
+
         Args:
             audio_path: Path to the audio file
-            
+
         Returns:
             TranscriptionResult object
         """
         audio_path = Path(audio_path)
-        
+
         if not audio_path.exists():
             return TranscriptionResult(
                 success=False,
                 audio_file=audio_path,
                 error=f"Audio file not found: {audio_path}",
             )
-        
+
         try:
             # Read the audio file
-            with open(audio_path, 'rb') as f:
+            with open(audio_path, "rb") as f:
                 audio_data = f.read()
-            
+
             # Get ASR service
             asr_service = self._get_asr_service()
-            
+
             # Configure recognition. NIM Whisper may not populate alt.words; segment-by-pauses
             # path does not depend on word timings.
             config = riva.client.RecognitionConfig(
@@ -860,29 +911,31 @@ class WhisperClient:
                 enable_automatic_punctuation=True,
                 enable_word_time_offsets=True,
             )
-            
+
             # Perform offline recognition
             response = asr_service.offline_recognize(audio_data, config)
-            
+
             # Extract transcript
             full_text = ""
             segments = []
-            
+
             for result in response.results:
                 if result.alternatives:
                     alt = result.alternatives[0]
                     full_text += alt.transcript + " "
-                    
+
                     # Extract word-level timing if available (may be empty with NIM Whisper)
                     words = []
                     for word_info in alt.words:
-                        words.append({
-                            "word": word_info.word,
-                            "start_time": word_info.start_time,
-                            "end_time": word_info.end_time,
-                            "confidence": word_info.confidence,
-                        })
-                    
+                        words.append(
+                            {
+                                "word": word_info.word,
+                                "start_time": word_info.start_time,
+                                "end_time": word_info.end_time,
+                                "confidence": word_info.confidence,
+                            }
+                        )
+
                     seg = {
                         "text": alt.transcript,
                         "confidence": alt.confidence,
@@ -892,7 +945,7 @@ class WhisperClient:
                         seg["start_time"] = words[0]["start_time"]
                         seg["end_time"] = words[-1]["end_time"]
                     segments.append(seg)
-            
+
             return TranscriptionResult(
                 success=True,
                 audio_file=audio_path,
@@ -901,7 +954,7 @@ class WhisperClient:
                 segments=segments,
                 transcribed_at=datetime.now(timezone.utc),
             )
-            
+
         except Exception as e:
             logger.error(f"Transcription failed: {e}")
             return TranscriptionResult(
@@ -909,7 +962,7 @@ class WhisperClient:
                 audio_file=audio_path,
                 error=str(e),
             )
-    
+
     def convert_and_transcribe(
         self,
         audio_path: Path,
@@ -947,7 +1000,7 @@ class WhisperClient:
         preprocess_requested = preprocess.value
         preprocess_applied = preprocess.value
         preprocess_fallback_chain: list[str] = []
-        
+
         if not audio_path.exists():
             return TranscriptionResult(
                 success=False,
@@ -966,11 +1019,11 @@ class WhisperClient:
                 recordings_root=recordings_root,
             )
             if wav_path is None:
-                with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                     wav_path = Path(tmp.name)
                     keep_preprocessed_audio = False
         else:
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                 wav_path = Path(tmp.name)
 
         try:
@@ -1050,7 +1103,7 @@ class WhisperClient:
                         preprocess_applied=preprocess_applied,
                         preprocess_fallback_chain=preprocess_fallback_chain,
                     )
-            
+
             if segment_by_pauses:
                 logger.info(f"Segmenting by pauses: {audio_path.name}")
                 pause_result = self._transcribe_by_pauses(
@@ -1067,13 +1120,13 @@ class WhisperClient:
                 pause_result.preprocess_applied = preprocess_applied
                 pause_result.preprocess_fallback_chain = preprocess_fallback_chain
                 return pause_result
-            
+
             # Check file size - gRPC has a 4MB limit
             # At 16kHz 16-bit mono = 32KB/sec, so 4MB = ~120 seconds
             # Use 90 seconds per chunk to be safe
             wav_size = wav_path.stat().st_size
             max_chunk_size = 3 * 1024 * 1024  # 3MB to stay safely under 4MB limit
-            
+
             if wav_size <= max_chunk_size:
                 # Small file - transcribe directly
                 transcription = self.transcribe_file(wav_path)
@@ -1100,33 +1153,36 @@ class WhisperClient:
                 transcription.preprocess_applied = preprocess_applied
                 transcription.preprocess_fallback_chain = preprocess_fallback_chain
                 return transcription
-            
+
         finally:
             # Clean up temp file unless we explicitly keep preprocessing artifacts.
             if wav_path.exists() and not keep_preprocessed_audio:
                 wav_path.unlink()
-    
+
     def _transcribe_chunked(self, wav_path: Path, original_path: Path) -> TranscriptionResult:
         """Transcribe a large WAV file by splitting into chunks.
-        
+
         Args:
             wav_path: Path to the WAV file to transcribe
             original_path: Original audio file path (for result metadata)
-            
+
         Returns:
             TranscriptionResult with combined transcription
         """
         # Calculate chunk duration: 3MB at 32KB/sec = ~94 seconds
         # Use 90 seconds per chunk for safety
         chunk_duration_sec = 90
-        
+
         # Get audio duration using ffprobe
         try:
             cmd = [
                 "ffprobe",
-                "-v", "error",
-                "-show_entries", "format=duration",
-                "-of", "default=noprint_wrappers=1:nokey=1",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
                 str(wav_path),
             ]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -1135,69 +1191,77 @@ class WhisperClient:
             logger.error(f"Failed to get audio duration: {e}")
             # Estimate from file size (32KB/sec for 16kHz 16-bit mono)
             total_duration = wav_path.stat().st_size / 32000
-        
-        logger.info(f"Audio duration: {total_duration:.1f}s, chunking into {chunk_duration_sec}s segments")
-        
+
+        logger.info(
+            f"Audio duration: {total_duration:.1f}s, chunking into {chunk_duration_sec}s segments"
+        )
+
         all_text = []
         all_segments = []
         chunk_num = 0
         start_time = 0.0
-        
+
         while start_time < total_duration:
             chunk_num += 1
             end_time = min(start_time + chunk_duration_sec, total_duration)
-            
+
             # Extract chunk using ffmpeg
-            with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as tmp:
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
                 chunk_path = Path(tmp.name)
-            
+
             try:
                 cmd = [
                     "ffmpeg",
                     "-y",
-                    "-i", str(wav_path),
-                    "-ss", str(start_time),
-                    "-t", str(chunk_duration_sec),
-                    "-c", "copy",  # No re-encoding needed
+                    "-i",
+                    str(wav_path),
+                    "-ss",
+                    str(start_time),
+                    "-t",
+                    str(chunk_duration_sec),
+                    "-c",
+                    "copy",  # No re-encoding needed
                     str(chunk_path),
                 ]
-                
+
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
-                
+
                 if result.returncode != 0:
                     logger.error(f"Failed to extract chunk {chunk_num}: {result.stderr[:200]}")
                     start_time = end_time
                     continue
-                
+
                 # Transcribe chunk
-                logger.debug(f"Transcribing chunk {chunk_num} ({start_time:.1f}s - {end_time:.1f}s)")
+                logger.debug(
+                    f"Transcribing chunk {chunk_num} ({start_time:.1f}s - {end_time:.1f}s)"
+                )
                 chunk_result = self.transcribe_file(chunk_path)
-                
+
                 if chunk_result.success and chunk_result.text:
                     all_text.append(chunk_result.text)
-                    
+
                     # Adjust segment timestamps to be relative to original file
                     for segment in chunk_result.segments:
                         adjusted_segment = segment.copy()
-                        if 'words' in adjusted_segment:
-                            for word in adjusted_segment['words']:
-                                if 'start_time' in word:
-                                    word['start_time'] += start_time
-                                if 'end_time' in word:
-                                    word['end_time'] += start_time
+                        if "words" in adjusted_segment:
+                            for word in adjusted_segment["words"]:
+                                if "start_time" in word:
+                                    word["start_time"] += start_time
+                                if "end_time" in word:
+                                    word["end_time"] += start_time
                         all_segments.append(adjusted_segment)
                 elif not chunk_result.success:
                     logger.warning(f"Chunk {chunk_num} transcription failed: {chunk_result.error}")
-                
+
             finally:
                 if chunk_path.exists():
                     chunk_path.unlink()
-            
+
             start_time = end_time
-        
+
         # Combine results
         combined_text = " ".join(all_text)
-        
+
         return TranscriptionResult(
             success=True,
             audio_file=original_path,
@@ -1269,12 +1333,23 @@ class WhisperClient:
                     while t < seg_end:
                         chunk_len = min(max_chunk_sec, seg_end - t)
                         cmd = [
-                            "ffmpeg", "-y",
-                            "-i", str(wav_path),
-                            "-ss", str(t),
-                            "-t", str(chunk_len),
-                            "-ac", "1", "-ar", "16000", "-sample_fmt", "s16",
-                            "-f", "wav", str(slice_path),
+                            "ffmpeg",
+                            "-y",
+                            "-i",
+                            str(wav_path),
+                            "-ss",
+                            str(t),
+                            "-t",
+                            str(chunk_len),
+                            "-ac",
+                            "1",
+                            "-ar",
+                            "16000",
+                            "-sample_fmt",
+                            "s16",
+                            "-f",
+                            "wav",
+                            str(slice_path),
                         ]
                         result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
                         if result.returncode != 0:
@@ -1288,12 +1363,23 @@ class WhisperClient:
                     seg_text = " ".join(chunk_texts).strip()
                 else:
                     cmd = [
-                        "ffmpeg", "-y",
-                        "-i", str(wav_path),
-                        "-ss", str(seg_start),
-                        "-t", str(seg_duration),
-                        "-ac", "1", "-ar", "16000", "-sample_fmt", "s16",
-                        "-f", "wav", str(slice_path),
+                        "ffmpeg",
+                        "-y",
+                        "-i",
+                        str(wav_path),
+                        "-ss",
+                        str(seg_start),
+                        "-t",
+                        str(seg_duration),
+                        "-ac",
+                        "1",
+                        "-ar",
+                        "16000",
+                        "-sample_fmt",
+                        "s16",
+                        "-f",
+                        "wav",
+                        str(slice_path),
                     ]
                     result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
                     if result.returncode != 0:
@@ -1323,7 +1409,8 @@ class WhisperClient:
                     slice_path.unlink()
 
         visible_segments = [
-            s for s in all_segments
+            s
+            for s in all_segments
             if _clean_text(s.get("text", "")) and _clean_text(s.get("text", "")) != "..."
         ]
         if not visible_segments:
@@ -1365,32 +1452,37 @@ class WhisperClient:
 
 def convert_mp3_to_wav(mp3_path: Path, wav_path: Optional[Path] = None) -> Optional[Path]:
     """Convert an MP3 file to WAV format suitable for Whisper.
-    
+
     Args:
         mp3_path: Path to the MP3 file
         wav_path: Optional output path. If None, uses same name with .wav extension.
-        
+
     Returns:
         Path to the WAV file, or None if conversion failed
     """
     mp3_path = Path(mp3_path)
-    
+
     if wav_path is None:
-        wav_path = mp3_path.with_suffix('.wav')
+        wav_path = mp3_path.with_suffix(".wav")
     else:
         wav_path = Path(wav_path)
-    
+
     cmd = [
         "ffmpeg",
         "-y",
-        "-i", str(mp3_path),
-        "-ac", "1",  # Mono
-        "-ar", "16000",  # 16kHz
-        "-sample_fmt", "s16",  # 16-bit
-        "-f", "wav",
+        "-i",
+        str(mp3_path),
+        "-ac",
+        "1",  # Mono
+        "-ar",
+        "16000",  # 16kHz
+        "-sample_fmt",
+        "s16",  # 16-bit
+        "-f",
+        "wav",
         str(wav_path),
     ]
-    
+
     try:
         result = subprocess.run(
             cmd,
@@ -1398,13 +1490,13 @@ def convert_mp3_to_wav(mp3_path: Path, wav_path: Optional[Path] = None) -> Optio
             text=True,
             timeout=300,
         )
-        
+
         if result.returncode == 0 and wav_path.exists():
             return wav_path
         else:
             logger.error(f"ffmpeg conversion failed: {result.stderr[:500]}")
             return None
-            
+
     except Exception as e:
         logger.error(f"Conversion error: {e}")
         return None
@@ -1443,8 +1535,10 @@ def export_timestamped_txt(
         output_path = Path(output_path)
 
     timed_segments = [
-        s for s in result.segments
-        if isinstance(s.get("start_time"), (int, float)) and isinstance(s.get("end_time"), (int, float))
+        s
+        for s in result.segments
+        if isinstance(s.get("start_time"), (int, float))
+        and isinstance(s.get("end_time"), (int, float))
     ]
     if not timed_segments:
         logger.warning("No segments with start_time/end_time for timestamped export")
@@ -1478,8 +1572,10 @@ def export_srt(result: TranscriptionResult, output_path: Optional[Path] = None) 
         output_path = Path(output_path)
 
     timed_segments = [
-        s for s in result.segments
-        if isinstance(s.get("start_time"), (int, float)) and isinstance(s.get("end_time"), (int, float))
+        s
+        for s in result.segments
+        if isinstance(s.get("start_time"), (int, float))
+        and isinstance(s.get("end_time"), (int, float))
     ]
     if not timed_segments:
         logger.warning("No segments with start_time/end_time for SRT export")
@@ -1506,7 +1602,7 @@ def save_transcript(
     recordings_root: Optional[Path] = None,
 ) -> Path:
     """Save a transcription result to a JSON file.
-    
+
     Args:
         result: TranscriptionResult object
         output_path: Optional output path. If None, saves alongside audio file.
@@ -1514,15 +1610,15 @@ def save_transcript(
         preprocess: Preprocessing method for variant tracking.
         variant_store: Optional variant store to register the transcript.
         recordings_root: Root recordings directory for computing relative paths.
-        
+
     Returns:
         Path to the saved transcript file
     """
     if output_path is None:
-        output_path = result.audio_file.with_suffix('.json')
+        output_path = result.audio_file.with_suffix(".json")
     else:
         output_path = Path(output_path)
-    
+
     transcript_data = {
         "audio_file": result.audio_file.name,
         "language": result.language,
@@ -1534,13 +1630,13 @@ def save_transcript(
         "transcribed_at": result.transcribed_at.isoformat() if result.transcribed_at else None,
         "success": result.success,
     }
-    
+
     if result.error:
         transcript_data["error"] = result.error
-    
-    with open(output_path, 'w', encoding='utf-8') as f:
+
+    with open(output_path, "w", encoding="utf-8") as f:
         json.dump(transcript_data, f, indent=2, ensure_ascii=False)
-    
+
     result.transcript_file = output_path
 
     if variant_store is not None:
@@ -1583,7 +1679,11 @@ def stitch_transcript_boundary_with_previous(
 
     current_audio = current_data.get("audio_file")
     current_segments = current_data.get("segments")
-    if not isinstance(current_audio, str) or not isinstance(current_segments, list) or not current_segments:
+    if (
+        not isinstance(current_audio, str)
+        or not isinstance(current_segments, list)
+        or not current_segments
+    ):
         return False
 
     ordered_pairs = _ordered_transcript_audio_pairs(transcript_path.parent)
@@ -1651,10 +1751,14 @@ def stitch_transcript_boundary_with_previous(
     prev_data["segments"] = prev_segments
     current_data["segments"] = current_segments
     prev_data["text"] = " ".join(_clean_text(seg.get("text", "")) for seg in prev_segments).strip()
-    current_data["text"] = " ".join(_clean_text(seg.get("text", "")) for seg in current_segments).strip()
+    current_data["text"] = " ".join(
+        _clean_text(seg.get("text", "")) for seg in current_segments
+    ).strip()
 
     prev_path.write_text(json.dumps(prev_data, indent=2, ensure_ascii=False), encoding="utf-8")
-    transcript_path.write_text(json.dumps(current_data, indent=2, ensure_ascii=False), encoding="utf-8")
+    transcript_path.write_text(
+        json.dumps(current_data, indent=2, ensure_ascii=False), encoding="utf-8"
+    )
     return True
 
 
@@ -1740,15 +1844,12 @@ class TranscriptionWatcher:
             variant_store: Optional TranscriptVariantStore for variant tracking.
         """
         if not WATCHDOG_AVAILABLE:
-            raise RuntimeError(
-                "watchdog is not installed. "
-                "Install with: pip install watchdog"
-            )
+            raise RuntimeError("watchdog is not installed. " "Install with: pip install watchdog")
 
         self.watch_dir = Path(watch_dir)
         self.client = client
         self.on_transcription = on_transcription
-        self.file_patterns = file_patterns or ['.mp3']
+        self.file_patterns = file_patterns or [".mp3"]
         self._preprocess = preprocess
         self._segment_by_pauses = segment_by_pauses
         self._min_silence_duration = min_silence_duration
@@ -1768,42 +1869,42 @@ class TranscriptionWatcher:
         self._keep_preprocessed_audio = keep_preprocessed_audio
         self._observer = None
         self._running = False
-    
+
     def _should_transcribe(self, path: Path) -> bool:
         """Check if a file should be transcribed.
-        
+
         Args:
             path: Path to check
-            
+
         Returns:
             True if the file should be transcribed
         """
         # Check extension
         if path.suffix.lower() not in self.file_patterns:
             return False
-        
+
         # Check if transcript already exists
-        transcript_path = path.with_suffix('.json')
+        transcript_path = path.with_suffix(".json")
         if transcript_path.exists():
             return False
-        
+
         return True
-    
+
     def _handle_new_file(self, path: Path) -> None:
         """Handle a new audio file.
-        
+
         Args:
             path: Path to the new file
         """
         if not self._should_transcribe(path):
             return
-        
+
         # Wait a bit for file to be fully written
         time.sleep(2)
-        
+
         if not path.exists():
             return
-        
+
         logger.info(f"Transcribing: {path}")
 
         try:
@@ -1841,7 +1942,9 @@ class TranscriptionWatcher:
                             logger.info(f"Boundary stitched: {result.transcript_file}")
                             refresh_result_from_saved_transcript(result)
                     except Exception as exc:
-                        logger.error(f"Boundary stitching failed for {result.transcript_file}: {exc}")
+                        logger.error(
+                            f"Boundary stitching failed for {result.transcript_file}: {exc}"
+                        )
                 logger.info(f"Transcription saved: {result.transcript_file}")
                 if result.transcript_file and self._on_transcript_saved:
                     try:
@@ -1864,21 +1967,21 @@ class TranscriptionWatcher:
 
         except Exception as e:
             logger.error(f"Error transcribing {path}: {e}")
-    
+
     def start(self) -> None:
         """Start watching for new files."""
         if self._running:
             return
-        
+
         class Handler(FileSystemEventHandler):
             def __init__(handler_self, watcher):
                 handler_self.watcher = watcher
-            
+
             def on_created(handler_self, event):
                 if isinstance(event, FileCreatedEvent) and not event.is_directory:
                     path = Path(event.src_path)
                     handler_self.watcher._handle_new_file(path)
-        
+
         self._observer = Observer()
         self._observer.schedule(
             Handler(self),
@@ -1888,7 +1991,7 @@ class TranscriptionWatcher:
         self._observer.start()
         self._running = True
         logger.info(f"Started watching: {self.watch_dir}")
-    
+
     def stop(self) -> None:
         """Stop watching for files."""
         if self._observer:
@@ -1897,7 +2000,7 @@ class TranscriptionWatcher:
             self._observer = None
         self._running = False
         logger.info("Stopped watching")
-    
+
     def run_forever(self) -> None:
         """Run the watcher until interrupted."""
         self.start()
@@ -2057,19 +2160,19 @@ def watch_and_transcribe(
         grpc_host = os.environ.get("WHISPER_GRPC_HOST", "localhost")
     if grpc_port is None:
         grpc_port = int(os.environ.get("WHISPER_GRPC_PORT", "50051"))
-    
+
     client = WhisperClient(
         grpc_host=grpc_host,
         grpc_port=grpc_port,
         language_code=language_code,
     )
-    
+
     # Wait for Whisper service to be available
     logger.info(f"Waiting for Whisper service at {client.server_uri}...")
     while not client.check_connection():
         time.sleep(5)
     logger.info("Whisper service is ready")
-    
+
     watcher = TranscriptionWatcher(
         watch_dir=watch_dir,
         client=client,
@@ -2109,14 +2212,14 @@ def find_untranscribed_files(
         List of audio file paths without transcripts
     """
     if extensions is None:
-        extensions = ['.mp3']
+        extensions = [".mp3"]
 
     directory = Path(directory)
     untranscribed = []
 
     for ext in extensions:
         for audio_file in directory.rglob(f"*{ext}"):
-            transcript_file = audio_file.with_suffix('.json')
+            transcript_file = audio_file.with_suffix(".json")
             if not transcript_file.exists():
                 untranscribed.append(audio_file)
 
@@ -2137,7 +2240,7 @@ def find_audio_files(
         List of audio file paths
     """
     if extensions is None:
-        extensions = ['.mp3']
+        extensions = [".mp3"]
     directory = Path(directory)
     files = []
     for ext in extensions:
@@ -2271,12 +2374,14 @@ def transcribe_all(
 
         except Exception as e:
             logger.error(f"  Error: {e}")
-            results.append(TranscriptionResult(
-                success=False,
-                audio_file=audio_file,
-                error=str(e),
-            ))
-    
+            results.append(
+                TranscriptionResult(
+                    success=False,
+                    audio_file=audio_file,
+                    error=str(e),
+                )
+            )
+
     return results
 
 
@@ -2291,11 +2396,11 @@ def compare_preprocessing(
     recordings_root: Optional[Path] = None,
 ) -> dict[str, TranscriptionResult]:
     """Compare transcription results using different preprocessing methods.
-    
+
     Transcribes the same audio file with no preprocessing, ffmpeg filters,
     and sox noise reduction, then saves comparison results.  Each result is
     also registered as a variant when a variant_store is provided.
-    
+
     Args:
         audio_path: Path to the audio file to test
         grpc_host: Whisper gRPC host (default from env WHISPER_GRPC_HOST)
@@ -2305,7 +2410,7 @@ def compare_preprocessing(
         asr_model: ASR model name for variant tracking.
         variant_store: Optional TranscriptVariantStore for variant tracking.
         recordings_root: Root recordings directory for computing relative paths.
-        
+
     Returns:
         Dict mapping preprocessing method name to TranscriptionResult
     """
@@ -2314,30 +2419,30 @@ def compare_preprocessing(
         grpc_host = os.environ.get("WHISPER_GRPC_HOST", "localhost")
     if grpc_port is None:
         grpc_port = int(os.environ.get("WHISPER_GRPC_PORT", "50051"))
-    
+
     audio_path = Path(audio_path)
     if output_dir is None:
         output_dir = audio_path.parent
     else:
         output_dir = Path(output_dir)
-    
+
     # Check for sox availability
     sox_available = shutil.which("sox") is not None
     if not sox_available:
         logger.warning("sox not found in PATH - sox preprocessing will be skipped")
-    
+
     # Create client
     client = WhisperClient(
         grpc_host=grpc_host,
         grpc_port=grpc_port,
         language_code=language_code,
     )
-    
+
     # Check connection
     if not client.check_connection():
         logger.error(f"Cannot connect to Whisper service at {client.server_uri}")
         return {}
-    
+
     results = {}
     methods = [
         ("none", AudioPreprocess.NONE),
@@ -2350,36 +2455,38 @@ def compare_preprocessing(
         methods.append(("maxine", AudioPreprocess.MAXINE))
     else:
         logger.warning("Maxine CLI not found - maxine preprocessing will be skipped")
-    
+
     base_name = audio_path.stem
     is_first = True
-    
+
     for method_name, preprocess in methods:
         logger.info(f"\n{'='*60}")
         logger.info(f"Transcribing with preprocessing: {method_name.upper()}")
         logger.info(f"{'='*60}")
-        
+
         start_time = time.time()
         result = client.convert_and_transcribe(audio_path, preprocess=preprocess)
         elapsed = time.time() - start_time
-        
+
         results[method_name] = result
-        
+
         if result.success:
             output_path = output_dir / f"{base_name}_transcript_{method_name}.json"
             result.transcript_file = output_path
-            
+
             transcript_data = {
                 "audio_file": audio_path.name,
                 "preprocessing": method_name,
                 "language": result.language,
                 "text": result.text,
                 "segments": result.segments,
-                "transcribed_at": result.transcribed_at.isoformat() if result.transcribed_at else None,
+                "transcribed_at": (
+                    result.transcribed_at.isoformat() if result.transcribed_at else None
+                ),
                 "processing_time_seconds": elapsed,
             }
-            
-            with open(output_path, 'w', encoding='utf-8') as f:
+
+            with open(output_path, "w", encoding="utf-8") as f:
                 json.dump(transcript_data, f, indent=2, ensure_ascii=False)
 
             if variant_store is not None:
@@ -2399,18 +2506,22 @@ def compare_preprocessing(
                 except Exception as exc:
                     logger.error("Failed to register comparison variant: %s", exc)
             is_first = False
-            
+
             logger.info(f"  Time: {elapsed:.1f}s")
             logger.info(f"  Saved: {output_path}")
-            logger.info(f"  Text preview: {result.text[:200]}..." if len(result.text) > 200 else f"  Text: {result.text}")
+            logger.info(
+                f"  Text preview: {result.text[:200]}..."
+                if len(result.text) > 200
+                else f"  Text: {result.text}"
+            )
         else:
             logger.error(f"  Failed: {result.error}")
-    
+
     # Print comparison summary
     logger.info(f"\n{'='*60}")
     logger.info("COMPARISON SUMMARY")
     logger.info(f"{'='*60}")
-    
+
     for method_name, result in results.items():
         if result.success:
             word_count = len(result.text.split())
@@ -2418,5 +2529,5 @@ def compare_preprocessing(
             logger.info(f"  {result.text[:300]}{'...' if len(result.text) > 300 else ''}")
         else:
             logger.info(f"\n[{method_name.upper()}] - FAILED: {result.error}")
-    
+
     return results

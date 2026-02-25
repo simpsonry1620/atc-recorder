@@ -277,7 +277,9 @@ def profile_to_dict(profile: PositionProfile) -> dict:
     """Serialize a PositionProfile to a JSON-safe dict."""
     return {
         "feed_id": profile.feed_id,
-        "time_window_start": profile.time_window_start.isoformat() if profile.time_window_start else None,
+        "time_window_start": (
+            profile.time_window_start.isoformat() if profile.time_window_start else None
+        ),
         "time_window_end": profile.time_window_end.isoformat() if profile.time_window_end else None,
         "total_segments": profile.total_segments,
         "atc_segments": profile.atc_segments,

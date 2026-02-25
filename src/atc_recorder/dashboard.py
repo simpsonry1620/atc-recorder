@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
-from .config import Config, load_config
+from .config import Config
 from .logging import get_logger
 
 logger = get_logger(__name__)
@@ -31,9 +31,7 @@ def _recordings_dir(config: Config) -> Path:
 def _scan_feeds(recordings: Path) -> list[str]:
     if not recordings.is_dir():
         return []
-    return sorted(
-        d.name for d in recordings.iterdir() if d.is_dir() and not d.name.startswith(".")
-    )
+    return sorted(d.name for d in recordings.iterdir() if d.is_dir() and not d.name.startswith("."))
 
 
 def _scan_dates(recordings: Path, feed_id: str) -> list[str]:
@@ -50,11 +48,13 @@ def _scan_recordings(recordings: Path, feed_id: str, date: str) -> list[dict]:
     items = []
     for mp3 in sorted(day_dir.glob("*.mp3")):
         transcript = mp3.with_suffix(".json")
-        items.append({
-            "filename": mp3.name,
-            "has_transcript": transcript.exists(),
-            "size_bytes": mp3.stat().st_size,
-        })
+        items.append(
+            {
+                "filename": mp3.name,
+                "has_transcript": transcript.exists(),
+                "size_bytes": mp3.stat().st_size,
+            }
+        )
     return items
 
 
@@ -108,7 +108,9 @@ def _resolve_recording_start(recordings: Path, audio_file: str) -> Optional[date
         except Exception:
             pass
     try:
-        return datetime.strptime(f"{date_str} {hh}{mm}", "%Y-%m-%d %H%M").replace(tzinfo=timezone.utc)
+        return datetime.strptime(f"{date_str} {hh}{mm}", "%Y-%m-%d %H%M").replace(
+            tzinfo=timezone.utc
+        )
     except ValueError:
         return None
 
@@ -156,12 +158,16 @@ def _pipeline_stats(recordings: Path) -> dict:
                     json_count += 1
                     try:
                         mtime = f.stat().st_mtime
-                        recent.append({
-                            "file": f.name,
-                            "feed_id": feed_dir.name,
-                            "date": date_dir.name,
-                            "modified": datetime.fromtimestamp(mtime, tz=timezone.utc).isoformat(),
-                        })
+                        recent.append(
+                            {
+                                "file": f.name,
+                                "feed_id": feed_dir.name,
+                                "date": date_dir.name,
+                                "modified": datetime.fromtimestamp(
+                                    mtime, tz=timezone.utc
+                                ).isoformat(),
+                            }
+                        )
                     except OSError:
                         pass
 
@@ -209,6 +215,7 @@ def _sqlite_doc_count(config: Config) -> Optional[int]:
 def _check_service_health(url: str, timeout: float = 3.0) -> bool:
     try:
         import requests as _requests
+
         resp = _requests.get(url, timeout=timeout)
         return resp.status_code == 200
     except Exception:
@@ -250,11 +257,15 @@ def create_app(config: Config) -> FastAPI:
         # Whisper ASR
         whisper_host = os.environ.get("WHISPER_GRPC_HOST", "whisper-asr")
         whisper_http_ok = _check_service_health(f"http://{whisper_host}:9000/v1/health/ready")
-        whisper_grpc_ok = _check_tcp_port(whisper_host, int(os.environ.get("WHISPER_GRPC_PORT", "50051")))
+        whisper_grpc_ok = _check_tcp_port(
+            whisper_host, int(os.environ.get("WHISPER_GRPC_PORT", "50051"))
+        )
         services["whisper_asr"] = whisper_http_ok or whisper_grpc_ok
         parakeet_host = os.environ.get("PARAKEET_GRPC_HOST", "parakeet-asr")
         parakeet_http_ok = _check_service_health(f"http://{parakeet_host}:9000/v1/health/ready")
-        parakeet_grpc_ok = _check_tcp_port(parakeet_host, int(os.environ.get("PARAKEET_GRPC_PORT", "50051")))
+        parakeet_grpc_ok = _check_tcp_port(
+            parakeet_host, int(os.environ.get("PARAKEET_GRPC_PORT", "50051"))
+        )
         services["parakeet_asr"] = parakeet_http_ok or parakeet_grpc_ok
 
         if config.rag and config.rag.enabled:
@@ -263,10 +274,7 @@ def create_app(config: Config) -> FastAPI:
             services["embedding_nim"] = _check_service_health(f"{base}/health/ready")
 
             milvus_host = config.rag.vector_store.host
-            milvus_port = config.rag.vector_store.port
-            services["milvus"] = _check_service_health(
-                f"http://{milvus_host}:{9091}/healthz"
-            )
+            services["milvus"] = _check_service_health(f"http://{milvus_host}:{9091}/healthz")
         else:
             services["embedding_nim"] = None
             services["milvus"] = None
@@ -406,7 +414,9 @@ def create_app(config: Config) -> FastAPI:
                 language_code="en-US",
             )
             if not client.check_connection():
-                raise HTTPException(503, f"Cannot connect to ASR service at {grpc_host}:{grpc_port}")
+                raise HTTPException(
+                    503, f"Cannot connect to ASR service at {grpc_host}:{grpc_port}"
+                )
 
             attempts: list[tuple[bool, AudioPreprocess]] = [(segment_by_pauses, preprocess_mode)]
             if segment_by_pauses:
@@ -447,7 +457,9 @@ def create_app(config: Config) -> FastAPI:
             raise HTTPException(500, f"ASR execution failed: {exc}")
 
         if not result or not result.success:
-            raise HTTPException(500, f"ASR transcription failed: {result.error if result else 'unknown error'}")
+            raise HTTPException(
+                500, f"ASR transcription failed: {result.error if result else 'unknown error'}"
+            )
         if not _has_content(result):
             raise HTTPException(
                 422,
@@ -497,6 +509,7 @@ def create_app(config: Config) -> FastAPI:
         sox_ok = shutil.which("sox") is not None
         try:
             from .transcribe import _maxine_available
+
             maxine_ok = _maxine_available()
         except Exception:
             maxine_ok = False
@@ -519,7 +532,7 @@ def create_app(config: Config) -> FastAPI:
         name = filepath.stem
         if not name.startswith(stem + "_"):
             return None
-        remainder = name[len(stem) + 1:]
+        remainder = name[len(stem) + 1 :]
 
         method = None
         for m in _METHODS_LONGEST_FIRST:
@@ -529,10 +542,10 @@ def create_app(config: Config) -> FastAPI:
         if method is None:
             return None
 
-        after_method = remainder[len(method):]
+        after_method = remainder[len(method) :]
         param_tag = ""
         if after_method.startswith("_custom_"):
-            param_tag = after_method[len("_custom_"):]
+            param_tag = after_method[len("_custom_") :]
         elif after_method.startswith("_"):
             param_tag = after_method[1:]
 
@@ -551,7 +564,9 @@ def create_app(config: Config) -> FastAPI:
             "param_tag": param_tag,
             "is_custom": bool(param_tag),
             "mtime": mtime,
-            "mtime_iso": datetime.fromtimestamp(mtime, tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            "mtime_iso": datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            ),
         }
 
     @app.get("/api/preprocess/artifacts")
@@ -607,33 +622,42 @@ def create_app(config: Config) -> FastAPI:
 
     _PARAM_SCHEMA = {
         "ffmpeg": {
-            "highpass_freq":        {"type": int,   "min": 50,   "max": 1000, "default": 300},
-            "lowpass_freq":         {"type": int,   "min": 1000, "max": 8000, "default": 3400},
-            "noise_floor_db":       {"type": int,   "min": -60,  "max": 0,    "default": -25},
-            "dynaudnorm_peak":      {"type": float, "min": 0.1,  "max": 1.0,  "default": 0.9},
-            "dynaudnorm_smoothing": {"type": int,   "min": 1,    "max": 30,   "default": 5},
+            "highpass_freq": {"type": int, "min": 50, "max": 1000, "default": 300},
+            "lowpass_freq": {"type": int, "min": 1000, "max": 8000, "default": 3400},
+            "noise_floor_db": {"type": int, "min": -60, "max": 0, "default": -25},
+            "dynaudnorm_peak": {"type": float, "min": 0.1, "max": 1.0, "default": 0.9},
+            "dynaudnorm_smoothing": {"type": int, "min": 1, "max": 30, "default": 5},
         },
         "ffmpeg_vad": {
-            "highpass_freq":        {"type": int,   "min": 50,   "max": 1000, "default": 300},
-            "lowpass_freq":         {"type": int,   "min": 1000, "max": 8000, "default": 3400},
-            "noise_floor_db":       {"type": int,   "min": -60,  "max": 0,    "default": -20},
-            "dynaudnorm_peak":      {"type": float, "min": 0.1,  "max": 1.0,  "default": 0.9},
-            "dynaudnorm_smoothing": {"type": int,   "min": 1,    "max": 30,   "default": 3},
-            "silence_stop_duration":{"type": float, "min": 0.05, "max": 5.0,  "default": 0.3},
-            "silence_threshold_db": {"type": int,   "min": -60,  "max": 0,    "default": -30},
-            "leave_silence":        {"type": float, "min": 0.0,  "max": 2.0,  "default": 0.1},
+            "highpass_freq": {"type": int, "min": 50, "max": 1000, "default": 300},
+            "lowpass_freq": {"type": int, "min": 1000, "max": 8000, "default": 3400},
+            "noise_floor_db": {"type": int, "min": -60, "max": 0, "default": -20},
+            "dynaudnorm_peak": {"type": float, "min": 0.1, "max": 1.0, "default": 0.9},
+            "dynaudnorm_smoothing": {"type": int, "min": 1, "max": 30, "default": 3},
+            "silence_stop_duration": {"type": float, "min": 0.05, "max": 5.0, "default": 0.3},
+            "silence_threshold_db": {"type": int, "min": -60, "max": 0, "default": -30},
+            "leave_silence": {"type": float, "min": 0.0, "max": 2.0, "default": 0.1},
         },
         "sox": {
-            "noise_sample_duration":{"type": float, "min": 0.1,  "max": 5.0,  "default": 0.5},
-            "noise_reduction":      {"type": float, "min": 0.0,  "max": 1.0,  "default": 0.21},
-            "highpass_freq":        {"type": int,   "min": 50,   "max": 1000, "default": 300},
-            "lowpass_freq":         {"type": int,   "min": 1000, "max": 8000, "default": 3400},
+            "noise_sample_duration": {"type": float, "min": 0.1, "max": 5.0, "default": 0.5},
+            "noise_reduction": {"type": float, "min": 0.0, "max": 1.0, "default": 0.21},
+            "highpass_freq": {"type": int, "min": 50, "max": 1000, "default": 300},
+            "lowpass_freq": {"type": int, "min": 1000, "max": 8000, "default": 3400},
         },
         "maxine": {
-            "intensity_ratio":      {"type": float, "min": 0.0,  "max": 1.0,  "default": 1.0},
-            "effect_version":       {"type": int,   "min": 1,    "max": 2,    "default": 1},
-            "enable_vad":           {"type": int,   "min": 0,    "max": 1,    "default": 0},
-            "effect":               {"type": str,   "options": ["denoiser", "dereverb_denoiser", "superres", "studio_voice_high_quality"], "default": "denoiser"},
+            "intensity_ratio": {"type": float, "min": 0.0, "max": 1.0, "default": 1.0},
+            "effect_version": {"type": int, "min": 1, "max": 2, "default": 1},
+            "enable_vad": {"type": int, "min": 0, "max": 1, "default": 0},
+            "effect": {
+                "type": str,
+                "options": [
+                    "denoiser",
+                    "dereverb_denoiser",
+                    "superres",
+                    "studio_voice_high_quality",
+                ],
+                "default": "denoiser",
+            },
         },
     }
 
@@ -756,10 +780,14 @@ def create_app(config: Config) -> FastAPI:
         results = []
         for method in methods:
             if method not in dispatch:
-                results.append({"method": method, "success": False, "error": f"Unknown method: {method}"})
+                results.append(
+                    {"method": method, "success": False, "error": f"Unknown method: {method}"}
+                )
                 continue
 
-            method_params = _validate_params(method, custom_params.get(method, {})) if has_custom else {}
+            method_params = (
+                _validate_params(method, custom_params.get(method, {})) if has_custom else {}
+            )
 
             suffix = _build_artifact_suffix(method, method_params)
             out_path = out_dir / f"{stem}_{method}{suffix}.wav"
@@ -768,23 +796,27 @@ def create_app(config: Config) -> FastAPI:
             try:
                 ok = dispatch[method](audio_path, out_path, **method_params)
                 elapsed = round(_time.monotonic() - t0, 2)
-                results.append({
-                    "method": method,
-                    "success": ok,
-                    "filename": out_path.name if ok else None,
-                    "size_bytes": out_path.stat().st_size if ok and out_path.exists() else 0,
-                    "elapsed_seconds": elapsed,
-                    "params_applied": method_params or None,
-                    "error": None if ok else f"{method} preprocessing failed",
-                })
+                results.append(
+                    {
+                        "method": method,
+                        "success": ok,
+                        "filename": out_path.name if ok else None,
+                        "size_bytes": out_path.stat().st_size if ok and out_path.exists() else 0,
+                        "elapsed_seconds": elapsed,
+                        "params_applied": method_params or None,
+                        "error": None if ok else f"{method} preprocessing failed",
+                    }
+                )
             except Exception as exc:
                 elapsed = round(_time.monotonic() - t0, 2)
-                results.append({
-                    "method": method,
-                    "success": False,
-                    "error": str(exc),
-                    "elapsed_seconds": elapsed,
-                })
+                results.append(
+                    {
+                        "method": method,
+                        "success": False,
+                        "error": str(exc),
+                        "elapsed_seconds": elapsed,
+                    }
+                )
 
         return {"audio_file": filename, "results": results}
 
@@ -847,7 +879,9 @@ def create_app(config: Config) -> FastAPI:
                 language_code="en-US",
             )
             if not client.check_connection():
-                raise HTTPException(503, f"Cannot connect to ASR service at {grpc_host}:{grpc_port}")
+                raise HTTPException(
+                    503, f"Cannot connect to ASR service at {grpc_host}:{grpc_port}"
+                )
 
             t0 = _time.monotonic()
             result = client.transcribe_file(wav_path)
@@ -913,8 +947,12 @@ def create_app(config: Config) -> FastAPI:
                         "segment_index": h.segment_index,
                         "start_time_utc": h.start_time_utc.isoformat(),
                         "end_time_utc": h.end_time_utc.isoformat(),
-                        "start_offset_seconds": _audio_offset_seconds(recordings, h.audio_file, h.start_time_utc),
-                        "end_offset_seconds": _audio_offset_seconds(recordings, h.audio_file, h.end_time_utc),
+                        "start_offset_seconds": _audio_offset_seconds(
+                            recordings, h.audio_file, h.start_time_utc
+                        ),
+                        "end_offset_seconds": _audio_offset_seconds(
+                            recordings, h.audio_file, h.end_time_utc
+                        ),
                         "text": h.text,
                     }
                     for h in hits
@@ -955,14 +993,16 @@ def create_app(config: Config) -> FastAPI:
                         text = (seg.get("text") or "").strip()
                         if not text or text == "...":
                             continue
-                        segments.append({
-                            "text": text,
-                            "feed_id": feed_id,
-                            "role": (seg.get("speaker_role") or "UNKNOWN").upper(),
-                            "start_time": seg.get("start_time", 0),
-                            "file": jf.stem,
-                            "date": d.name,
-                        })
+                        segments.append(
+                            {
+                                "text": text,
+                                "feed_id": feed_id,
+                                "role": (seg.get("speaker_role") or "UNKNOWN").upper(),
+                                "start_time": seg.get("start_time", 0),
+                                "file": jf.stem,
+                                "date": d.name,
+                            }
+                        )
                 except Exception:
                     continue
 
@@ -973,6 +1013,7 @@ def create_app(config: Config) -> FastAPI:
         MAX_POINTS = 2000
         if len(segments) > MAX_POINTS:
             import random
+
             random.seed(42)
             segments = random.sample(segments, MAX_POINTS)
 
@@ -982,6 +1023,7 @@ def create_app(config: Config) -> FastAPI:
 
         try:
             from .embedding import create_embedding_client
+
             client = create_embedding_client(config.rag.embedding)
             vectors = []
             for seg in segments:
@@ -993,26 +1035,35 @@ def create_app(config: Config) -> FastAPI:
         # Dimensionality reduction
         try:
             import numpy as np
+
             X = np.array(vectors, dtype=np.float32)
 
             if X.shape[0] < 5:
                 from sklearn.decomposition import PCA
+
                 reducer = PCA(n_components=dims)
             else:
                 try:
                     from sklearn.manifold import TSNE
+
                     perplexity = min(30, max(5, X.shape[0] - 1))
                     reducer = TSNE(
-                        n_components=dims, perplexity=perplexity,
-                        random_state=42, max_iter=500,
+                        n_components=dims,
+                        perplexity=perplexity,
+                        random_state=42,
+                        max_iter=500,
                     )
                 except ImportError:
                     from sklearn.decomposition import PCA
+
                     reducer = PCA(n_components=dims)
 
             coords = reducer.fit_transform(X)
         except ImportError:
-            raise HTTPException(503, "scikit-learn is required for embedding visualization (pip install scikit-learn)")
+            raise HTTPException(
+                503,
+                "scikit-learn is required for embedding visualization (pip install scikit-learn)",
+            )
 
         # Build response
         points = []
@@ -1046,6 +1097,7 @@ def create_app(config: Config) -> FastAPI:
         if not db_path.exists():
             return None
         from .ingest import MetadataStore
+
         store = MetadataStore(db_path)
         store.ensure_schema()
         return store
@@ -1083,7 +1135,10 @@ def create_app(config: Config) -> FastAPI:
         if not store:
             raise HTTPException(503, "Metadata store not available")
         results = store.get_active_callsigns(
-            feed_id=feed_id, start_time=start_time, end_time=end_time, limit=limit,
+            feed_id=feed_id,
+            start_time=start_time,
+            end_time=end_time,
+            limit=limit,
         )
         return {"feed_id": feed_id, "callsigns": results, "count": len(results)}
 
@@ -1093,6 +1148,7 @@ def create_app(config: Config) -> FastAPI:
         if not store:
             return None
         from .flight_tracker import FlightTracker
+
         return FlightTracker(metadata_store=store)
 
     @app.get("/api/flights/recent")
@@ -1109,6 +1165,7 @@ def create_app(config: Config) -> FastAPI:
         if not tracker:
             raise HTTPException(503, "Metadata store not available")
         from .flight_tracker import flight_track_to_dict
+
         track = tracker.track_flight(callsign.upper())
         if not track:
             raise HTTPException(404, f"No data found for callsign {callsign}")
@@ -1123,6 +1180,7 @@ def create_app(config: Config) -> FastAPI:
         if not db_path.exists():
             return None
         from .controller_profile import ControllerProfiler
+
         return ControllerProfiler(db_path)
 
     @app.get("/api/profile/{feed_id}")
@@ -1135,6 +1193,7 @@ def create_app(config: Config) -> FastAPI:
         if not profiler:
             raise HTTPException(503, "Metadata store not available")
         from .controller_profile import profile_to_dict
+
         profile = profiler.profile_feed(feed_id, start_time=start_time, end_time=end_time)
         return profile_to_dict(profile)
 

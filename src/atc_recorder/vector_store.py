@@ -41,11 +41,15 @@ class VectorStoreAdapter(ABC):
         """Create required collection/index objects if needed."""
 
     @abstractmethod
-    def upsert_documents(self, documents: list[TranscriptDocument], vectors: list[list[float]]) -> int:
+    def upsert_documents(
+        self, documents: list[TranscriptDocument], vectors: list[list[float]]
+    ) -> int:
         """Insert or update documents and vectors."""
 
     @abstractmethod
-    def search(self, query_vector: list[float], filters: SearchFilters, top_k: int) -> list[SearchHit]:
+    def search(
+        self, query_vector: list[float], filters: SearchFilters, top_k: int
+    ) -> list[SearchHit]:
         """Search vectors with metadata filters."""
 
     @abstractmethod
@@ -84,7 +88,9 @@ class MilvusVectorStore(VectorStoreAdapter):
                 FieldSchema(name="ingested_at", dtype=DataType.INT64),
                 FieldSchema(name="quality_flags_json", dtype=DataType.VARCHAR, max_length=512),
                 FieldSchema(name="text", dtype=DataType.VARCHAR, max_length=65535),
-                FieldSchema(name="embedding", dtype=DataType.FLOAT_VECTOR, dim=self.config.embedding_dim),
+                FieldSchema(
+                    name="embedding", dtype=DataType.FLOAT_VECTOR, dim=self.config.embedding_dim
+                ),
             ]
             schema = CollectionSchema(fields=fields, enable_dynamic_field=False)
             collection = Collection(name=name, schema=schema)
@@ -109,7 +115,9 @@ class MilvusVectorStore(VectorStoreAdapter):
         assert self._collection is not None
         return self._collection
 
-    def upsert_documents(self, documents: list[TranscriptDocument], vectors: list[list[float]]) -> int:
+    def upsert_documents(
+        self, documents: list[TranscriptDocument], vectors: list[list[float]]
+    ) -> int:
         if not documents:
             return 0
         if len(documents) != len(vectors):
@@ -155,7 +163,9 @@ class MilvusVectorStore(VectorStoreAdapter):
             parts.append(f"feed_id not in [{feed_expr}]")
         return " and ".join(parts) if parts else ""
 
-    def search(self, query_vector: list[float], filters: SearchFilters, top_k: int) -> list[SearchHit]:
+    def search(
+        self, query_vector: list[float], filters: SearchFilters, top_k: int
+    ) -> list[SearchHit]:
         collection = self._collection_obj()
         expr = self._build_filter_expr(filters)
         search_params = {"metric_type": self.config.metric_type, "params": {"ef": 128}}

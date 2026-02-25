@@ -77,7 +77,9 @@ class NvidiaNIMEmbeddingClient(EmbeddingClient):
                 last_error = exc
                 if attempt < self.config.max_retries:
                     sleep_s = self.config.retry_backoff_seconds * attempt
-                    logger.warning("Embedding request failed (attempt %s), retrying in %.1fs", attempt, sleep_s)
+                    logger.warning(
+                        "Embedding request failed (attempt %s), retrying in %.1fs", attempt, sleep_s
+                    )
                     time.sleep(sleep_s)
         raise RuntimeError(f"Embedding request failed after retries: {last_error}") from last_error
 

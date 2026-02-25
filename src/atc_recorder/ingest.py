@@ -82,8 +82,7 @@ class MetadataStore:
 
     def ensure_schema(self) -> None:
         with self._conn() as conn:
-            conn.execute(
-                """
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS transcript_docs (
                     doc_id TEXT PRIMARY KEY,
                     feed_id TEXT NOT NULL,
@@ -95,13 +94,11 @@ class MetadataStore:
                     quality_flags TEXT NOT NULL,
                     ingested_at TEXT NOT NULL
                 )
-                """
-            )
+                """)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_docs_feed_time ON transcript_docs(feed_id, start_time_utc, end_time_utc)"
             )
-            conn.execute(
-                """
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS entity_mentions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     doc_id TEXT NOT NULL,
@@ -114,8 +111,7 @@ class MetadataStore:
                     start_offset INTEGER,
                     end_offset INTEGER
                 )
-                """
-            )
+                """)
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_entity_normalized ON entity_mentions(normalized, timestamp_utc)"
             )
@@ -125,9 +121,7 @@ class MetadataStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_entity_type ON entity_mentions(entity_type, normalized)"
             )
-            conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_entity_doc ON entity_mentions(doc_id)"
-            )
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_entity_doc ON entity_mentions(doc_id)")
             conn.commit()
 
     def upsert_documents(self, docs: list[TranscriptDocument]) -> int:
@@ -257,7 +251,11 @@ class MetadataStore:
         return [dict(row) for row in rows]
 
     def get_active_callsigns(
-        self, feed_id: Optional[str] = None, start_time: Optional[str] = None, end_time: Optional[str] = None, limit: int = 100
+        self,
+        feed_id: Optional[str] = None,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
+        limit: int = 100,
     ) -> list[dict]:
         """Get distinct callsigns active in a time window, optionally on a specific feed."""
         where = ["em.entity_type = 'callsign'"]
@@ -519,5 +517,11 @@ class TranscriptIngestionService:
         vector = self.embedding_client.embed_text(query, input_type="query").vector
         hits = self.vector_store.search(vector, filters=filters, top_k=top_k)
         elapsed_ms = int((time.perf_counter() - t0) * 1000)
-        logger.info("search query_len=%s top_k=%s hits=%s elapsed_ms=%s", len(query), top_k, len(hits), elapsed_ms)
+        logger.info(
+            "search query_len=%s top_k=%s hits=%s elapsed_ms=%s",
+            len(query),
+            top_k,
+            len(hits),
+            elapsed_ms,
+        )
         return hits

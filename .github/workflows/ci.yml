@@ -14,16 +14,31 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Prepare environment
+        run: |
+          mkdir -p recordings logs
+          touch credentials.json
+
       - name: Build test container
         run: docker compose build atc-recorder
 
-      - name: Run lint and tests in container
+      - name: Black (format check)
         run: >
-          docker compose run --rm --entrypoint sh
-          -v "$GITHUB_WORKSPACE:/app"
+          docker compose run --rm --no-deps --entrypoint sh
           atc-recorder
-          -lc "cd /app &&
-          python -m pip install --no-cache-dir black ruff pytest pytest-cov &&
-          python -m black --check src tests &&
-          python -m ruff check src tests &&
+          -lc "pip install --no-cache-dir -q black &&
+          python -m black --check src tests"
+
+      - name: Ruff (lint)
+        run: >
+          docker compose run --rm --no-deps --entrypoint sh
+          atc-recorder
+          -lc "pip install --no-cache-dir -q ruff &&
+          python -m ruff check src tests"
+
+      - name: Pytest
+        run: >
+          docker compose run --rm --no-deps --entrypoint sh
+          atc-recorder
+          -lc "pip install --no-cache-dir -q pytest pytest-cov &&
           python -m pytest -q -o cache_dir=/tmp/pytest-cache"

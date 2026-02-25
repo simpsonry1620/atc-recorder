@@ -26,7 +26,9 @@ def _parse_feed_id(audio_file_name: str) -> str:
     return audio_file_name.split("_", 1)[0]
 
 
-def _variant_id(audio_file: str, asr_model: str, preprocess: str, parent_variant_id: Optional[str]) -> str:
+def _variant_id(
+    audio_file: str, asr_model: str, preprocess: str, parent_variant_id: Optional[str]
+) -> str:
     raw = f"{audio_file}|{asr_model}|{preprocess}|{parent_variant_id or ''}"
     return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:16]
 
@@ -175,12 +177,21 @@ class TranscriptVariantStore:
                     notes=excluded.notes
                 """,
                 (
-                    vid, audio_file, audio_path, feed_id,
-                    asr_model, preprocess, variant_type, parent_variant_id,
+                    vid,
+                    audio_file,
+                    audio_path,
+                    feed_id,
+                    asr_model,
+                    preprocess,
+                    variant_type,
+                    parent_variant_id,
                     1 if activate else 0,
                     json.dumps(transcript_data, ensure_ascii=False),
-                    word_count, segment_count,
-                    now, created_by, notes,
+                    word_count,
+                    segment_count,
+                    now,
+                    created_by,
+                    notes,
                 ),
             )
             if activate:
@@ -195,7 +206,11 @@ class TranscriptVariantStore:
 
         logger.info(
             "Saved variant %s for %s (model=%s, preprocess=%s, active=%s)",
-            vid[:8], audio_file, asr_model, preprocess, activate,
+            vid[:8],
+            audio_file,
+            asr_model,
+            preprocess,
+            activate,
         )
         return vid
 
@@ -300,13 +315,15 @@ class TranscriptVariantStore:
         text_a = a.transcript.get("text", "")
         text_b = b.transcript.get("text", "")
 
-        diff_lines = list(difflib.unified_diff(
-            text_a.splitlines(keepends=True),
-            text_b.splitlines(keepends=True),
-            fromfile=f"{a.asr_model}/{a.preprocess}",
-            tofile=f"{b.asr_model}/{b.preprocess}",
-            lineterm="",
-        ))
+        diff_lines = list(
+            difflib.unified_diff(
+                text_a.splitlines(keepends=True),
+                text_b.splitlines(keepends=True),
+                fromfile=f"{a.asr_model}/{a.preprocess}",
+                tofile=f"{b.asr_model}/{b.preprocess}",
+                lineterm="",
+            )
+        )
 
         segs_a = a.transcript.get("segments", [])
         segs_b = b.transcript.get("segments", [])
@@ -341,7 +358,9 @@ class TranscriptVariantStore:
         logger.info("Deleted variant %s for %s", variant_id[:8], variant.audio_file)
         return True
 
-    def backfill(self, recordings_dir: Path, asr_model: str = "whisper-large-v3", preprocess: str = "unknown") -> int:
+    def backfill(
+        self, recordings_dir: Path, asr_model: str = "whisper-large-v3", preprocess: str = "unknown"
+    ) -> int:
         """Scan existing JSON transcripts and register them as active variants.
 
         Idempotent: skips audio files that already have a variant registered.
@@ -395,7 +414,9 @@ class TranscriptVariantStore:
         logger.info("Backfill complete: %d new variants registered", count)
         return count
 
-    def _write_active_to_disk(self, audio_file: str, audio_path: str, transcript_data: dict) -> None:
+    def _write_active_to_disk(
+        self, audio_file: str, audio_path: str, transcript_data: dict
+    ) -> None:
         target_dir = self.recordings_root / audio_path
         if not target_dir.exists():
             logger.warning("Target directory does not exist, skipping disk write: %s", target_dir)
@@ -407,7 +428,10 @@ class TranscriptVariantStore:
                 json.dump(transcript_data, f, indent=2, ensure_ascii=False)
             logger.debug("Wrote active variant to disk: %s", output_path)
         except PermissionError:
-            logger.debug("Permission denied writing %s (file may already exist from another process)", output_path)
+            logger.debug(
+                "Permission denied writing %s (file may already exist from another process)",
+                output_path,
+            )
 
     @staticmethod
     def _align_segments(segs_a: list[dict], segs_b: list[dict]) -> list[dict]:
@@ -432,11 +456,13 @@ class TranscriptVariantStore:
             if best_match is not None:
                 b_text = segs_b[best_match].get("text", "").strip()
                 if a_text != b_text:
-                    diffs.append({
-                        "time_range": f"{a_start:.1f}-{a_end:.1f}",
-                        "text_a": a_text,
-                        "text_b": b_text,
-                    })
+                    diffs.append(
+                        {
+                            "time_range": f"{a_start:.1f}-{a_end:.1f}",
+                            "text_a": a_text,
+                            "text_b": b_text,
+                        }
+                    )
                 j = best_match + 1
 
         return diffs

@@ -9,7 +9,6 @@ from typing import Any, Optional
 
 from .logging import get_logger
 
-
 logger = get_logger(__name__)
 
 # Map known feed IDs to their frequencies for handoff detection.
@@ -198,25 +197,27 @@ def flight_track_to_dict(track: FlightTrack) -> dict:
     """Serialize a FlightTrack to a JSON-safe dict."""
     legs = []
     for leg in track.legs:
-        legs.append({
-            "feed_id": leg.feed_id,
-            "frequency": leg.frequency,
-            "first_heard": leg.first_heard.isoformat(),
-            "last_heard": leg.last_heard.isoformat(),
-            "segment_count": len(leg.segments),
-            "segments": [
-                {
-                    "text": s.get("text", ""),
-                    "audio_file": s.get("audio_file", ""),
-                    "start_time_utc": s.get("start_time_utc", ""),
-                    "end_time_utc": s.get("end_time_utc", ""),
-                    "feed_id": s.get("feed_id", ""),
-                }
-                for s in leg.segments
-            ],
-            "handoff_to": leg.handoff_to,
-            "handoff_frequency": leg.handoff_frequency,
-        })
+        legs.append(
+            {
+                "feed_id": leg.feed_id,
+                "frequency": leg.frequency,
+                "first_heard": leg.first_heard.isoformat(),
+                "last_heard": leg.last_heard.isoformat(),
+                "segment_count": len(leg.segments),
+                "segments": [
+                    {
+                        "text": s.get("text", ""),
+                        "audio_file": s.get("audio_file", ""),
+                        "start_time_utc": s.get("start_time_utc", ""),
+                        "end_time_utc": s.get("end_time_utc", ""),
+                        "feed_id": s.get("feed_id", ""),
+                    }
+                    for s in leg.segments
+                ],
+                "handoff_to": leg.handoff_to,
+                "handoff_frequency": leg.handoff_frequency,
+            }
+        )
 
     result: dict = {
         "callsign": track.callsign,

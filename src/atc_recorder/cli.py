@@ -2,7 +2,6 @@
 
 import signal
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -13,8 +12,8 @@ from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskPr
 from rich.table import Table
 
 from . import __version__
-from .archive import ArchiveDownloader, download_archives
-from .config import Config, load_config, DCA_FEEDS
+from .archive import ArchiveDownloader
+from .config import Config, load_config
 from .feeds import FeedDiscovery, FeedDiscoveryError, list_feeds
 from .stream import StreamRecorder, record_feed
 from .utils import check_ffmpeg, format_duration, parse_duration
@@ -26,12 +25,12 @@ try:
         transcribe_file as do_transcribe_file,
         watch_and_transcribe,
         find_untranscribed_files,
-        transcribe_all as do_transcribe_all,
         compare_preprocessing,
         AudioPreprocess,
         RIVA_AVAILABLE,
         WATCHDOG_AVAILABLE,
     )
+
     TRANSCRIPTION_AVAILABLE = RIVA_AVAILABLE
 except ImportError:
     TRANSCRIPTION_AVAILABLE = False
@@ -49,9 +48,7 @@ def _resolve_preprocess(method: Optional[str]) -> "AudioPreprocess":
         return AudioPreprocess(raw)
     except ValueError:
         valid = ", ".join(p.value for p in AudioPreprocess)
-        raise click.ClickException(
-            f"Invalid preprocess mode '{method}'. Expected one of: {valid}."
-        )
+        raise click.ClickException(f"Invalid preprocess mode '{method}'. Expected one of: {valid}.")
 
 
 def _build_transcript_ingest_callback(cfg: Config):
@@ -62,6 +59,7 @@ def _build_transcript_ingest_callback(cfg: Config):
 
     try:
         from .ingest import TranscriptIngestionService
+
         ingest_service = TranscriptIngestionService(cfg)
     except Exception as exc:
         console.print(f"[yellow]RAG ingestion disabled: {exc}[/yellow]")
@@ -72,7 +70,9 @@ def _build_transcript_ingest_callback(cfg: Config):
         if stats.errors > 0:
             console.print(f"[red]✗[/red] RAG ingest failed for {transcript_path.name}")
         else:
-            console.print(f"[green]✓[/green] RAG ingest: {transcript_path.name} ({stats.docs_upserted} docs)")
+            console.print(
+                f"[green]✓[/green] RAG ingest: {transcript_path.name} ({stats.docs_upserted} docs)"
+            )
 
     return _callback
 
@@ -83,6 +83,7 @@ def _build_variant_store(cfg: Config):
     db_path = Path(trans.variant_store_path) if trans else Path("./recordings/transcripts.db")
     try:
         from .variant_store import TranscriptVariantStore
+
         return TranscriptVariantStore(db_path=db_path, recordings_root=cfg.output_dir)
     except Exception as exc:
         console.print(f"[yellow]Variant store unavailable: {exc}[/yellow]")
@@ -92,6 +93,7 @@ def _build_variant_store(cfg: Config):
 def _get_asr_model_name(host: str, port: int) -> str:
     """Infer ASR model name from the gRPC endpoint environment/defaults."""
     import os
+
     grpc_host = os.environ.get("WHISPER_GRPC_HOST", host)
     if "parakeet" in grpc_host.lower():
         return "parakeet-tdt-0.6b-v2"
@@ -102,13 +104,17 @@ def _get_asr_model_name(host: str, port: int) -> str:
 
 @click.group()
 @click.version_option(version=__version__)
-@click.option('--config', '-c', type=click.Path(exists=True, path_type=Path),
-              help='Path to configuration file')
+@click.option(
+    "--config",
+    "-c",
+    type=click.Path(exists=True, path_type=Path),
+    help="Path to configuration file",
+)
 @click.pass_context
 def cli(ctx: click.Context, config: Optional[Path]) -> None:
     """ATC Recorder - Record and download ATC audio from LiveATC.net."""
     ctx.ensure_object(dict)
-    ctx.obj['config'] = load_config(config)
+    ctx.obj["config"] = load_config(config)
 
 
 @cli.group()
@@ -117,41 +123,41 @@ def feeds() -> None:
     pass
 
 
-@feeds.command('list')
-@click.argument('icao')
-@click.option('--verbose', '-v', is_flag=True, help='Show detailed information')
+@feeds.command("list")
+@click.argument("icao")
+@click.option("--verbose", "-v", is_flag=True, help="Show detailed information")
 @click.pass_context
 def feeds_list(ctx: click.Context, icao: str, verbose: bool) -> None:
     """List available feeds for an airport.
-    
+
     ICAO is the airport code (e.g., kdca, kjfk, klax).
     """
-    config = ctx.obj['config']
-    
+    config = ctx.obj["config"]
+
     with console.status(f"[bold blue]Fetching feeds for {icao.upper()}..."):
         try:
             feed_list = list_feeds(icao, config)
         except FeedDiscoveryError as e:
             console.print(f"[red]Error: {e}[/red]")
             sys.exit(1)
-    
+
     if not feed_list:
         console.print(f"[yellow]No feeds found for {icao.upper()}[/yellow]")
         return
-    
+
     table = Table(title=f"Available Feeds for {icao.upper()}")
     table.add_column("Feed ID", style="cyan")
     table.add_column("Status", style="green")
     table.add_column("Description", style="white")
     table.add_column("Frequency", style="yellow")
-    
+
     if verbose:
         table.add_column("Archive URL", style="dim")
-    
+
     for feed in feed_list:
         status = "[green]UP[/green]" if feed.is_up else "[red]DOWN[/red]"
         freq = feed.primary_frequency or "N/A"
-        
+
         if verbose:
             table.add_row(
                 feed.feed_id,
@@ -167,26 +173,26 @@ def feeds_list(ctx: click.Context, icao: str, verbose: bool) -> None:
                 feed.title,
                 freq,
             )
-    
+
     console.print(table)
     console.print(f"\n[dim]Total: {len(feed_list)} feeds[/dim]")
 
 
-@feeds.command('url')
-@click.argument('feed_id')
+@feeds.command("url")
+@click.argument("feed_id")
 @click.pass_context
 def feeds_url(ctx: click.Context, feed_id: str) -> None:
     """Get the stream URL for a specific feed."""
-    config = ctx.obj['config']
+    config = ctx.obj["config"]
     discovery = FeedDiscovery(config)
-    
+
     with console.status(f"[bold blue]Fetching stream URL for {feed_id}..."):
         try:
             url = discovery.get_stream_url(feed_id)
         except FeedDiscoveryError as e:
             console.print(f"[red]Error: {e}[/red]")
             sys.exit(1)
-    
+
     if url:
         console.print(f"[green]Stream URL:[/green] {url}")
     else:
@@ -194,50 +200,50 @@ def feeds_url(ctx: click.Context, feed_id: str) -> None:
 
 
 @cli.command()
-@click.argument('feed_id')
-@click.option('--duration', '-d', default='30m',
-              help='Recording duration (e.g., 30m, 2h, 1h30m)')
-@click.option('--output', '-o', type=click.Path(path_type=Path),
-              help='Output directory')
+@click.argument("feed_id")
+@click.option("--duration", "-d", default="30m", help="Recording duration (e.g., 30m, 2h, 1h30m)")
+@click.option("--output", "-o", type=click.Path(path_type=Path), help="Output directory")
 @click.pass_context
 def record(ctx: click.Context, feed_id: str, duration: str, output: Optional[Path]) -> None:
     """Record a live stream.
-    
+
     FEED_ID is the feed identifier (e.g., kdca1_gnd).
     """
-    config = ctx.obj['config']
-    
+    config = ctx.obj["config"]
+
     # Check ffmpeg
     if not check_ffmpeg():
         console.print("[red]Error: ffmpeg is not installed or not found in PATH[/red]")
-        console.print("[dim]Install ffmpeg: apt install ffmpeg (Linux) or brew install ffmpeg (macOS)[/dim]")
+        console.print(
+            "[dim]Install ffmpeg: apt install ffmpeg (Linux) or brew install ffmpeg (macOS)[/dim]"
+        )
         sys.exit(1)
-    
+
     try:
         duration_seconds = parse_duration(duration)
     except ValueError as e:
         console.print(f"[red]Error: Invalid duration format: {e}[/red]")
         sys.exit(1)
-    
+
     output_dir = output or config.output_dir
-    
+
     console.print(f"[bold]Recording {feed_id}[/bold]")
     console.print(f"  Duration: {format_duration(duration_seconds)}")
     console.print(f"  Output: {output_dir}")
     console.print(f"  Segment: {format_duration(config.segment_duration)}")
     console.print()
-    
+
     recorder = StreamRecorder(config)
-    
+
     # Handle Ctrl+C gracefully
     def signal_handler(sig, frame):
         console.print("\n[yellow]Stopping recording...[/yellow]")
         recorder.stop()
-    
+
     signal.signal(signal.SIGINT, signal_handler)
-    
+
     num_segments = (duration_seconds + config.segment_duration - 1) // config.segment_duration
-    
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -246,56 +252,54 @@ def record(ctx: click.Context, feed_id: str, duration: str, output: Optional[Pat
         console=console,
     ) as progress:
         task = progress.add_task(f"Recording {feed_id}...", total=num_segments)
-        
+
         def on_segment_complete(result):
             if result.success:
                 progress.console.print(f"  [green]✓[/green] Saved: {result.output_file.name}")
             else:
                 progress.console.print(f"  [red]✗[/red] Error: {result.error}")
             progress.advance(task)
-        
+
         results = recorder.record(
             feed_id=feed_id,
             duration_seconds=duration_seconds,
             output_dir=output_dir,
             on_segment_complete=on_segment_complete,
         )
-    
+
     # Summary
     success_count = sum(1 for r in results if r.success)
     console.print()
-    console.print(f"[bold]Recording complete[/bold]")
+    console.print("[bold]Recording complete[/bold]")
     console.print(f"  Segments: {success_count}/{len(results)} successful")
-    
+
     if success_count < len(results):
         sys.exit(1)
 
 
-@cli.command('record-all')
-@click.argument('icao')
-@click.option('--duration', '-d', default='30m',
-              help='Recording duration (e.g., 30m, 2h, 1h30m)')
-@click.option('--output', '-o', type=click.Path(path_type=Path),
-              help='Output directory')
+@cli.command("record-all")
+@click.argument("icao")
+@click.option("--duration", "-d", default="30m", help="Recording duration (e.g., 30m, 2h, 1h30m)")
+@click.option("--output", "-o", type=click.Path(path_type=Path), help="Output directory")
 @click.pass_context
 def record_all(ctx: click.Context, icao: str, duration: str, output: Optional[Path]) -> None:
     """Record all available feeds for an airport.
-    
+
     ICAO is the airport code (e.g., kdca, kjfk, klax).
     """
-    config = ctx.obj['config']
-    
+    config = ctx.obj["config"]
+
     # Check ffmpeg
     if not check_ffmpeg():
         console.print("[red]Error: ffmpeg is not installed or not found in PATH[/red]")
         sys.exit(1)
-    
+
     try:
         duration_seconds = parse_duration(duration)
     except ValueError as e:
         console.print(f"[red]Error: Invalid duration format: {e}[/red]")
         sys.exit(1)
-    
+
     # Get available feeds
     with console.status(f"[bold blue]Fetching feeds for {icao.upper()}..."):
         try:
@@ -303,33 +307,35 @@ def record_all(ctx: click.Context, icao: str, duration: str, output: Optional[Pa
         except FeedDiscoveryError as e:
             console.print(f"[red]Error: {e}[/red]")
             sys.exit(1)
-    
+
     # Filter to only online feeds
     online_feeds = [f for f in feed_list if f.is_up]
-    
+
     if not online_feeds:
         console.print(f"[yellow]No online feeds found for {icao.upper()}[/yellow]")
         return
-    
+
     console.print(f"[bold]Recording {len(online_feeds)} feeds for {icao.upper()}[/bold]")
     console.print(f"  Duration: {format_duration(duration_seconds)}")
     console.print()
-    
+
     # Note: This is a simplified version that records sequentially
     # A production version could use asyncio or threading for parallel recording
-    console.print("[yellow]Note: Recording feeds sequentially. For parallel recording, run multiple instances.[/yellow]")
+    console.print(
+        "[yellow]Note: Recording feeds sequentially. For parallel recording, run multiple instances.[/yellow]"
+    )
     console.print()
-    
+
     for feed in online_feeds:
         console.print(f"[bold cyan]{feed.feed_id}[/bold cyan] - {feed.title}")
-        
+
         results = record_feed(
             feed_id=feed.feed_id,
             duration=duration,
             output_dir=output or config.output_dir,
             config=config,
         )
-        
+
         success_count = sum(1 for r in results if r.success)
         if success_count == len(results):
             console.print(f"  [green]✓ Complete ({success_count} segments)[/green]")
@@ -338,15 +344,11 @@ def record_all(ctx: click.Context, icao: str, duration: str, output: Optional[Pa
 
 
 @cli.command()
-@click.argument('feed_id')
-@click.option('--date', '-d', required=True,
-              help='Date to download (YYYY-MM-DD)')
-@click.option('--start-hour', '-s', type=int, default=0,
-              help='Starting hour (0-23)')
-@click.option('--hours', '-h', type=int, default=24,
-              help='Number of hours to download')
-@click.option('--output', '-o', type=click.Path(path_type=Path),
-              help='Output directory')
+@click.argument("feed_id")
+@click.option("--date", "-d", required=True, help="Date to download (YYYY-MM-DD)")
+@click.option("--start-hour", "-s", type=int, default=0, help="Starting hour (0-23)")
+@click.option("--hours", "-h", type=int, default=24, help="Number of hours to download")
+@click.option("--output", "-o", type=click.Path(path_type=Path), help="Output directory")
 @click.pass_context
 def download(
     ctx: click.Context,
@@ -357,30 +359,30 @@ def download(
     output: Optional[Path],
 ) -> None:
     """Download historical archives.
-    
+
     FEED_ID is the feed identifier (e.g., kdca1_gnd).
     """
-    config = ctx.obj['config']
-    
+    config = ctx.obj["config"]
+
     try:
-        target_date = datetime.strptime(date, '%Y-%m-%d').replace(tzinfo=timezone.utc)
+        target_date = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
     except ValueError:
         console.print("[red]Error: Invalid date format. Use YYYY-MM-DD[/red]")
         sys.exit(1)
-    
+
     output_dir = output or config.output_dir
-    
+
     console.print(f"[bold]Downloading archives for {feed_id}[/bold]")
     console.print(f"  Date: {date}")
     console.print(f"  Hours: {start_hour:02d}:00 - {start_hour + hours:02d}:00 UTC")
     console.print(f"  Output: {output_dir}")
     console.print()
-    
+
     downloader = ArchiveDownloader(config)
-    
+
     # Calculate number of 30-minute segments
     num_segments = hours * 2
-    
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
@@ -389,11 +391,11 @@ def download(
         console=console,
     ) as progress:
         task = progress.add_task("Downloading archives...", total=num_segments)
-        
+
         success_count = 0
         skip_count = 0
         fail_count = 0
-        
+
         for result in downloader.download_date_range(
             feed_id=feed_id,
             start_date=target_date,
@@ -423,30 +425,34 @@ def download(
                         f"  [red]✗[/red] {result.archive_file.time_slot}: {result.error}"
                     )
                 fail_count += 1
-            
+
             progress.advance(task)
-    
+
     console.print()
-    console.print(f"[bold]Download complete[/bold]")
+    console.print("[bold]Download complete[/bold]")
     console.print(f"  Downloaded: {success_count}")
     console.print(f"  Skipped: {skip_count}")
     console.print(f"  Not available: {fail_count}")
 
 
 @cli.command()
-@click.option('--config', '-c', type=click.Path(exists=True, path_type=Path),
-              help='Path to configuration file')
+@click.option(
+    "--config",
+    "-c",
+    type=click.Path(exists=True, path_type=Path),
+    help="Path to configuration file",
+)
 @click.pass_context
 def daemon(ctx: click.Context, config: Optional[Path]) -> None:
     """Run continuous recording based on configuration.
-    
+
     Reads feeds from config file and records them continuously.
     """
     if config:
         cfg = load_config(config)
     else:
-        cfg = ctx.obj['config']
-    
+        cfg = ctx.obj["config"]
+
     if not cfg.feeds:
         console.print("[red]Error: No feeds configured in config file[/red]")
         console.print("[dim]Add feeds to your config.yaml:[/dim]")
@@ -454,16 +460,16 @@ def daemon(ctx: click.Context, config: Optional[Path]) -> None:
         console.print("[dim]  - kdca1_gnd[/dim]")
         console.print("[dim]  - kdca2_twr[/dim]")
         sys.exit(1)
-    
+
     if not cfg.recording.enabled:
         console.print("[yellow]Recording is disabled in configuration[/yellow]")
         sys.exit(0)
-    
+
     # Check ffmpeg
     if not check_ffmpeg():
         console.print("[red]Error: ffmpeg is not installed or not found in PATH[/red]")
         sys.exit(1)
-    
+
     console.print("[bold]ATC Recorder Daemon[/bold]")
     console.print(f"  Feeds: {len(cfg.feeds)}")
     console.print(f"  Segment: {format_duration(cfg.segment_duration)}")
@@ -471,64 +477,66 @@ def daemon(ctx: click.Context, config: Optional[Path]) -> None:
     console.print()
     console.print("[dim]Press Ctrl+C to stop[/dim]")
     console.print()
-    
+
     recorders = {}
     stop_requested = False
-    
+
     def signal_handler(sig, frame):
         nonlocal stop_requested
         console.print("\n[yellow]Stopping daemon...[/yellow]")
         stop_requested = True
         for recorder in recorders.values():
             recorder.stop()
-    
+
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
-    
+
     # Simple sequential recording loop
     # A production version would use asyncio or threading
     while not stop_requested:
         for feed_id in cfg.feeds:
             if stop_requested:
                 break
-            
+
             console.print(f"[cyan]Recording: {feed_id}[/cyan]")
-            
+
             recorder = StreamRecorder(cfg)
             recorders[feed_id] = recorder
-            
+
             results = recorder.record(
                 feed_id=feed_id,
                 duration_seconds=cfg.segment_duration,
                 output_dir=cfg.output_dir,
             )
-            
+
             for result in results:
                 if result.success:
                     console.print(f"  [green]✓[/green] {result.output_file.name}")
                 else:
                     console.print(f"  [red]✗[/red] {result.error}")
-    
+
     console.print("[bold]Daemon stopped[/bold]")
 
 
-@cli.command('check')
-@click.option('--quiet', '-q', is_flag=True, help='Only output on failure (for health checks)')
-@click.option('--strict', is_flag=True, help='Fail on network issues (default: network is warning only)')
+@cli.command("check")
+@click.option("--quiet", "-q", is_flag=True, help="Only output on failure (for health checks)")
+@click.option(
+    "--strict", is_flag=True, help="Fail on network issues (default: network is warning only)"
+)
 def check(quiet: bool, strict: bool) -> None:
     """Check system requirements.
-    
+
     Returns exit code 0 if critical checks pass, 1 otherwise.
     Network connectivity is a warning by default (use --strict to make it critical).
     Use --quiet for Docker health checks.
     """
     critical_passed = True
     has_warnings = False
-    
+
     if not quiet:
         console.print("[bold]System Check[/bold]")
         console.print()
-    
+
     # Check ffmpeg (critical)
     if check_ffmpeg():
         if not quiet:
@@ -537,14 +545,19 @@ def check(quiet: bool, strict: bool) -> None:
         critical_passed = False
         if not quiet:
             console.print("[red]✗[/red] ffmpeg is not installed")
-            console.print("  [dim]Install: apt install ffmpeg (Linux) or brew install ffmpeg (macOS)[/dim]")
+            console.print(
+                "  [dim]Install: apt install ffmpeg (Linux) or brew install ffmpeg (macOS)[/dim]"
+            )
         else:
             console.print("FAIL: ffmpeg not installed")
-    
+
     # Check output directory is writable (critical)
     try:
         from pathlib import Path
-        output_dir = Path("/app/recordings") if Path("/app/recordings").exists() else Path("./recordings")
+
+        output_dir = (
+            Path("/app/recordings") if Path("/app/recordings").exists() else Path("./recordings")
+        )
         output_dir.mkdir(parents=True, exist_ok=True)
         test_file = output_dir / ".write_test"
         test_file.touch()
@@ -556,11 +569,12 @@ def check(quiet: bool, strict: bool) -> None:
         if not quiet:
             console.print(f"[red]✗[/red] Output directory not writable: {e}")
         else:
-            console.print(f"FAIL: Output directory not writable")
-    
+            console.print("FAIL: Output directory not writable")
+
     # Check network connectivity (warning only, unless --strict)
     try:
         import requests
+
         response = requests.get("https://www.liveatc.net", timeout=10)
         if response.status_code == 200:
             if not quiet:
@@ -570,14 +584,16 @@ def check(quiet: bool, strict: bool) -> None:
             if strict:
                 critical_passed = False
             if not quiet:
-                console.print(f"[yellow]![/yellow] LiveATC.net returned status {response.status_code} (may be rate-limited)")
+                console.print(
+                    f"[yellow]![/yellow] LiveATC.net returned status {response.status_code} (may be rate-limited)"
+                )
     except Exception as e:
         has_warnings = True
         if strict:
             critical_passed = False
         if not quiet:
             console.print(f"[yellow]![/yellow] Cannot reach LiveATC.net: {e}")
-    
+
     if not quiet:
         console.print()
         if critical_passed and not has_warnings:
@@ -586,39 +602,76 @@ def check(quiet: bool, strict: bool) -> None:
             console.print("[bold yellow]Checks passed with warnings.[/bold yellow]")
         else:
             console.print("[bold red]Critical checks failed.[/bold red]")
-    
+
     if not critical_passed:
         sys.exit(1)
 
 
-@cli.command('transcribe')
-@click.argument('audio_file', type=click.Path(path_type=Path), required=False)
-@click.option('--host', '-H', envvar='WHISPER_GRPC_HOST', default='localhost',
-              help='Whisper gRPC host (env: WHISPER_GRPC_HOST)')
-@click.option('--port', '-p', envvar='WHISPER_GRPC_PORT', default=50051, type=int,
-              help='Whisper gRPC port (env: WHISPER_GRPC_PORT)')
-@click.option('--language', '-l', default='en-US',
-              help='Language code (BCP-47 format)')
-@click.option('--check', 'check_only', is_flag=True,
-              help='Only check connection to Whisper service')
-@click.option('--no-save', is_flag=True,
-              help='Do not save transcript to file')
-@click.option('--preprocess', type=click.Choice(['none', 'ffmpeg', 'ffmpeg_vad', 'sox', 'maxine']), default=None,
-              help='Audio preprocessing mode (default: from config, fallback none)')
-@click.option('--segment-by-pauses', is_flag=True,
-              help='Segment by silence and timestamp each segment')
-@click.option('--min-silence-duration', default=0.5, type=float,
-              help='Min silence duration (seconds) for pause detection')
-@click.option('--silence-db', default=-30.0, type=float,
-              help='dB level below which audio is considered silence')
-@click.option('--output-format', type=click.Choice(['json', 'timestamped-txt', 'srt']), default='json',
-              help='Output format: json only, or also write timestamped .txt or .srt')
-@click.option('--periodic-markers', default=0, type=float,
-              help='In timestamped-txt, insert marker lines every N seconds (0=off)')
-@click.option('--diarization', is_flag=True,
-              help='Annotate segments with role diarization labels (ATC/PILOT/UNKNOWN)')
-@click.option('--stitch-across-files', is_flag=True,
-              help='Stitch boundary transmissions with previous transcript when adjacent in time')
+@cli.command("transcribe")
+@click.argument("audio_file", type=click.Path(path_type=Path), required=False)
+@click.option(
+    "--host",
+    "-H",
+    envvar="WHISPER_GRPC_HOST",
+    default="localhost",
+    help="Whisper gRPC host (env: WHISPER_GRPC_HOST)",
+)
+@click.option(
+    "--port",
+    "-p",
+    envvar="WHISPER_GRPC_PORT",
+    default=50051,
+    type=int,
+    help="Whisper gRPC port (env: WHISPER_GRPC_PORT)",
+)
+@click.option("--language", "-l", default="en-US", help="Language code (BCP-47 format)")
+@click.option(
+    "--check", "check_only", is_flag=True, help="Only check connection to Whisper service"
+)
+@click.option("--no-save", is_flag=True, help="Do not save transcript to file")
+@click.option(
+    "--preprocess",
+    type=click.Choice(["none", "ffmpeg", "ffmpeg_vad", "sox", "maxine"]),
+    default=None,
+    help="Audio preprocessing mode (default: from config, fallback none)",
+)
+@click.option(
+    "--segment-by-pauses", is_flag=True, help="Segment by silence and timestamp each segment"
+)
+@click.option(
+    "--min-silence-duration",
+    default=0.5,
+    type=float,
+    help="Min silence duration (seconds) for pause detection",
+)
+@click.option(
+    "--silence-db",
+    default=-30.0,
+    type=float,
+    help="dB level below which audio is considered silence",
+)
+@click.option(
+    "--output-format",
+    type=click.Choice(["json", "timestamped-txt", "srt"]),
+    default="json",
+    help="Output format: json only, or also write timestamped .txt or .srt",
+)
+@click.option(
+    "--periodic-markers",
+    default=0,
+    type=float,
+    help="In timestamped-txt, insert marker lines every N seconds (0=off)",
+)
+@click.option(
+    "--diarization",
+    is_flag=True,
+    help="Annotate segments with role diarization labels (ATC/PILOT/UNKNOWN)",
+)
+@click.option(
+    "--stitch-across-files",
+    is_flag=True,
+    help="Stitch boundary transmissions with previous transcript when adjacent in time",
+)
 @click.pass_context
 def transcribe(
     ctx: click.Context,
@@ -638,16 +691,16 @@ def transcribe(
     stitch_across_files: bool,
 ) -> None:
     """Transcribe an audio file using Whisper ASR.
-    
+
     AUDIO_FILE is the path to the audio file (MP3, WAV, etc.).
-    
+
     Requires the NVIDIA Whisper ASR service to be running.
     """
     if not TRANSCRIPTION_AVAILABLE:
         console.print("[red]Error: Transcription dependencies not installed[/red]")
         console.print("[dim]Install with: pip install nvidia-riva-client[/dim]")
         sys.exit(1)
-    
+
     if check_only:
         # Just check connection
         client = WhisperClient(grpc_host=host, grpc_port=port, language_code=language)
@@ -658,23 +711,25 @@ def transcribe(
             else:
                 console.print(f"[red]✗[/red] Cannot connect to Whisper service at {host}:{port}")
                 sys.exit(1)
-    
+
     # Audio file is required when not checking
     if audio_file is None:
         console.print("[red]Error: AUDIO_FILE is required[/red]")
         sys.exit(1)
-    
+
     if not audio_file.exists():
         console.print(f"[red]Error: File not found: {audio_file}[/red]")
         sys.exit(1)
 
-    cfg = ctx.obj['config']
+    cfg = ctx.obj["config"]
     trans_cfg = getattr(cfg, "transcription", None)
-    preprocess_value = preprocess if preprocess is not None else (trans_cfg.preprocess if trans_cfg else "none")
+    preprocess_value = (
+        preprocess if preprocess is not None else (trans_cfg.preprocess if trans_cfg else "none")
+    )
     preprocess_mode = _resolve_preprocess(preprocess_value)
     preprocess_output_dir = Path(trans_cfg.preprocess_output_dir) if trans_cfg else None
     keep_preprocessed_audio = bool(trans_cfg.keep_preprocessed_audio) if trans_cfg else False
-    
+
     console.print(f"[bold]Transcribing: {audio_file}[/bold]")
     console.print(f"  Service: {host}:{port}")
     console.print(f"  Language: {language}")
@@ -682,7 +737,7 @@ def transcribe(
     if keep_preprocessed_audio:
         console.print(f"  Preprocess artifacts: {preprocess_output_dir}")
     console.print()
-    
+
     with console.status("[bold blue]Transcribing..."):
         result = do_transcribe_file(
             audio_path=audio_file,
@@ -701,7 +756,7 @@ def transcribe(
             diarization_enabled=diarization,
             stitch_across_files=stitch_across_files,
         )
-    
+
     if result.success:
         console.print("[green]✓ Transcription complete[/green]")
         if result.preprocess_applied != preprocess_mode.value:
@@ -713,15 +768,15 @@ def transcribe(
         console.print("[bold]Transcript:[/bold]")
         console.print(result.text)
         console.print()
-        
+
         if result.transcript_file and not no_save:
             console.print(f"[dim]Saved to: {result.transcript_file}[/dim]")
-            if output_format == 'timestamped-txt':
-                txt_path = result.audio_file.with_suffix('.txt')
+            if output_format == "timestamped-txt":
+                txt_path = result.audio_file.with_suffix(".txt")
                 if txt_path.exists():
                     console.print(f"[dim]Timestamped text: {txt_path}[/dim]")
-            elif output_format == 'srt':
-                srt_path = result.audio_file.with_suffix('.srt')
+            elif output_format == "srt":
+                srt_path = result.audio_file.with_suffix(".srt")
                 if srt_path.exists():
                     console.print(f"[dim]SRT: {srt_path}[/dim]")
     else:
@@ -729,17 +784,35 @@ def transcribe(
         sys.exit(1)
 
 
-@cli.command('transcribe-watch')
-@click.option('--config', '-c', type=click.Path(exists=True, path_type=Path),
-              help='Path to configuration file')
-@click.option('--host', '-H', envvar='WHISPER_GRPC_HOST', default='localhost',
-              help='Whisper gRPC host (env: WHISPER_GRPC_HOST)')
-@click.option('--port', '-p', envvar='WHISPER_GRPC_PORT', default=50051, type=int,
-              help='Whisper gRPC port (env: WHISPER_GRPC_PORT)')
-@click.option('--language', '-l', default='en-US',
-              help='Language code (BCP-47 format)')
-@click.option('--preprocess', type=click.Choice(['none', 'ffmpeg', 'ffmpeg_vad', 'sox', 'maxine']), default=None,
-              help='Audio preprocessing mode (default: from config, fallback none)')
+@cli.command("transcribe-watch")
+@click.option(
+    "--config",
+    "-c",
+    type=click.Path(exists=True, path_type=Path),
+    help="Path to configuration file",
+)
+@click.option(
+    "--host",
+    "-H",
+    envvar="WHISPER_GRPC_HOST",
+    default="localhost",
+    help="Whisper gRPC host (env: WHISPER_GRPC_HOST)",
+)
+@click.option(
+    "--port",
+    "-p",
+    envvar="WHISPER_GRPC_PORT",
+    default=50051,
+    type=int,
+    help="Whisper gRPC port (env: WHISPER_GRPC_PORT)",
+)
+@click.option("--language", "-l", default="en-US", help="Language code (BCP-47 format)")
+@click.option(
+    "--preprocess",
+    type=click.Choice(["none", "ffmpeg", "ffmpeg_vad", "sox", "maxine"]),
+    default=None,
+    help="Audio preprocessing mode (default: from config, fallback none)",
+)
 @click.pass_context
 def transcribe_watch(
     ctx: click.Context,
@@ -750,39 +823,41 @@ def transcribe_watch(
     preprocess: Optional[str],
 ) -> None:
     """Watch for new recordings and transcribe them automatically.
-    
+
     Monitors the recordings directory for new audio files and transcribes
     them using the NVIDIA Whisper ASR service.
-    
+
     Requires the NVIDIA Whisper ASR service to be running.
     """
     if not TRANSCRIPTION_AVAILABLE:
         console.print("[red]Error: Transcription dependencies not installed[/red]")
         console.print("[dim]Install with: pip install nvidia-riva-client[/dim]")
         sys.exit(1)
-    
+
     if not WATCHDOG_AVAILABLE:
         console.print("[red]Error: watchdog is not installed[/red]")
         console.print("[dim]Install with: pip install watchdog[/dim]")
         sys.exit(1)
-    
+
     if config:
         cfg = load_config(config)
     else:
-        cfg = ctx.obj['config']
-    
+        cfg = ctx.obj["config"]
+
     watch_dir = cfg.output_dir
-    
+
     # Transcription options from config
-    trans = getattr(cfg, 'transcription', None)
-    preprocess_value = preprocess if preprocess is not None else (trans.preprocess if trans else "none")
+    trans = getattr(cfg, "transcription", None)
+    preprocess_value = (
+        preprocess if preprocess is not None else (trans.preprocess if trans else "none")
+    )
     preprocess_mode = _resolve_preprocess(preprocess_value)
     segment_by_pauses = trans.segment_by_pauses if trans else False
     min_silence_duration = trans.min_silence_duration if trans else 0.5
     silence_db = trans.silence_threshold_dB if trans else -30.0
     min_speech_duration = trans.min_speech_duration if trans else 0.3
     merge_gap_seconds = trans.merge_gap_seconds if trans else 0.5
-    output_format = trans.output_format if trans else 'json'
+    output_format = trans.output_format if trans else "json"
     diarization_enabled = trans.diarization_enabled if trans else False
     diarization_mode = trans.diarization_mode if trans else "role-heuristic"
     stitch_across_files = trans.stitch_across_files if trans else False
@@ -836,33 +911,67 @@ def transcribe_watch(
         )
     except KeyboardInterrupt:
         pass
-    
+
     console.print("[bold]Watcher stopped[/bold]")
 
 
-@cli.command('transcribe-all')
-@click.option('--config', '-c', type=click.Path(exists=True, path_type=Path),
-              help='Path to configuration file')
-@click.option('--host', '-H', envvar='WHISPER_GRPC_HOST', default='localhost',
-              help='Whisper gRPC host (env: WHISPER_GRPC_HOST)')
-@click.option('--port', '-p', envvar='WHISPER_GRPC_PORT', default=50051, type=int,
-              help='Whisper gRPC port (env: WHISPER_GRPC_PORT)')
-@click.option('--language', '-l', default='en-US',
-              help='Language code (BCP-47 format)')
-@click.option('--force', '-f', is_flag=True,
-              help='Re-transcribe all audio files (overwrite existing transcripts)')
-@click.option('--preprocess', type=click.Choice(['none', 'ffmpeg', 'ffmpeg_vad', 'sox', 'maxine']), default=None,
-              help='Audio preprocessing mode (default: from config, fallback none)')
-@click.option('--segment-by-pauses', is_flag=True,
-              help='Segment by silence and timestamp each segment')
-@click.option('--output-format', type=click.Choice(['json', 'timestamped-txt', 'srt']), default='json',
-              help='Output format: json only, or also write .txt or .srt')
-@click.option('--diarization', is_flag=True,
-              help='Annotate segments with role diarization labels (ATC/PILOT/UNKNOWN)')
-@click.option('--stitch-across-files', is_flag=True,
-              help='Stitch boundary transmissions with previous transcript when adjacent in time')
-@click.option('--dry-run', is_flag=True,
-              help='Show files that would be transcribed without processing')
+@cli.command("transcribe-all")
+@click.option(
+    "--config",
+    "-c",
+    type=click.Path(exists=True, path_type=Path),
+    help="Path to configuration file",
+)
+@click.option(
+    "--host",
+    "-H",
+    envvar="WHISPER_GRPC_HOST",
+    default="localhost",
+    help="Whisper gRPC host (env: WHISPER_GRPC_HOST)",
+)
+@click.option(
+    "--port",
+    "-p",
+    envvar="WHISPER_GRPC_PORT",
+    default=50051,
+    type=int,
+    help="Whisper gRPC port (env: WHISPER_GRPC_PORT)",
+)
+@click.option("--language", "-l", default="en-US", help="Language code (BCP-47 format)")
+@click.option(
+    "--force",
+    "-f",
+    is_flag=True,
+    help="Re-transcribe all audio files (overwrite existing transcripts)",
+)
+@click.option(
+    "--preprocess",
+    type=click.Choice(["none", "ffmpeg", "ffmpeg_vad", "sox", "maxine"]),
+    default=None,
+    help="Audio preprocessing mode (default: from config, fallback none)",
+)
+@click.option(
+    "--segment-by-pauses", is_flag=True, help="Segment by silence and timestamp each segment"
+)
+@click.option(
+    "--output-format",
+    type=click.Choice(["json", "timestamped-txt", "srt"]),
+    default="json",
+    help="Output format: json only, or also write .txt or .srt",
+)
+@click.option(
+    "--diarization",
+    is_flag=True,
+    help="Annotate segments with role diarization labels (ATC/PILOT/UNKNOWN)",
+)
+@click.option(
+    "--stitch-across-files",
+    is_flag=True,
+    help="Stitch boundary transmissions with previous transcript when adjacent in time",
+)
+@click.option(
+    "--dry-run", is_flag=True, help="Show files that would be transcribed without processing"
+)
 @click.pass_context
 def transcribe_all(
     ctx: click.Context,
@@ -879,25 +988,27 @@ def transcribe_all(
     dry_run: bool,
 ) -> None:
     """Transcribe recordings in the recordings directory.
-    
+
     By default only transcribes MP3 files that don't have a transcript yet.
     Use --force to re-transcribe all audio files (overwrites existing JSON).
-    
+
     Requires the NVIDIA Whisper ASR service to be running.
     """
     if not TRANSCRIPTION_AVAILABLE:
         console.print("[red]Error: Transcription dependencies not installed[/red]")
         console.print("[dim]Install with: pip install nvidia-riva-client[/dim]")
         sys.exit(1)
-    
+
     if config:
         cfg = load_config(config)
     else:
-        cfg = ctx.obj['config']
-    
+        cfg = ctx.obj["config"]
+
     recordings_dir = cfg.output_dir
     trans = getattr(cfg, "transcription", None)
-    preprocess_value = preprocess if preprocess is not None else (trans.preprocess if trans else "none")
+    preprocess_value = (
+        preprocess if preprocess is not None else (trans.preprocess if trans else "none")
+    )
     preprocess_mode = _resolve_preprocess(preprocess_value)
     diarization_enabled = diarization or (trans.diarization_enabled if trans else False)
     diarization_mode = trans.diarization_mode if trans else "role-heuristic"
@@ -906,28 +1017,35 @@ def transcribe_all(
     stitch_min_text_overlap_chars = trans.stitch_min_text_overlap_chars if trans else 12
     preprocess_output_dir = Path(trans.preprocess_output_dir) if trans else None
     keep_preprocessed_audio = bool(trans.keep_preprocessed_audio) if trans else False
-    
+
     # Find files to transcribe
     with console.status("[bold blue]Scanning for files..."):
         if force:
             from .transcribe import find_audio_files
+
             files = find_audio_files(recordings_dir)
         else:
             files = find_untranscribed_files(recordings_dir)
-    
+
     if not files:
-        console.print("[green]No files to transcribe.[/green]" if force else "[green]All recordings have been transcribed![/green]")
+        console.print(
+            "[green]No files to transcribe.[/green]"
+            if force
+            else "[green]All recordings have been transcribed![/green]"
+        )
         return
-    
-    console.print(f"[bold]Found {len(files)} files to transcribe[/bold]" + (" (force)" if force else ""))
+
+    console.print(
+        f"[bold]Found {len(files)} files to transcribe[/bold]" + (" (force)" if force else "")
+    )
     console.print()
-    
+
     if dry_run:
         console.print("[yellow]Dry run - files that would be transcribed:[/yellow]")
         for f in files:
             console.print(f"  {f}")
         return
-    
+
     console.print(f"  Whisper service: {host}:{port}")
     console.print(f"  Language: {language}")
     console.print(f"  Preprocess: {preprocess_mode.value}")
@@ -988,6 +1106,7 @@ def transcribe_all(
                         stitch_transcript_boundary_with_previous,
                         refresh_result_from_saved_transcript,
                     )
+
                     save_transcript(
                         result,
                         asr_model=model_name_batch,
@@ -1017,32 +1136,46 @@ def transcribe_all(
                 else:
                     progress.console.print(f"  [red]✗[/red] {audio_file.name}: {result.error}")
                     fail_count += 1
-                    
+
             except Exception as e:
                 progress.console.print(f"  [red]✗[/red] {audio_file.name}: {e}")
                 fail_count += 1
-            
+
             progress.advance(task)
-    
+
     console.print()
     console.print("[bold]Batch transcription complete[/bold]")
     console.print(f"  Success: {success_count}")
     console.print(f"  Failed: {fail_count}")
-    
+
     if fail_count > 0:
         sys.exit(1)
 
 
-@cli.command('transcribe-compare')
-@click.argument('audio_file', type=click.Path(exists=True, path_type=Path))
-@click.option('--host', '-H', envvar='WHISPER_GRPC_HOST', default='localhost',
-              help='Whisper gRPC host (env: WHISPER_GRPC_HOST)')
-@click.option('--port', '-p', envvar='WHISPER_GRPC_PORT', default=50051, type=int,
-              help='Whisper gRPC port (env: WHISPER_GRPC_PORT)')
-@click.option('--language', '-l', default='en-US',
-              help='Language code (BCP-47 format)')
-@click.option('--output', '-o', type=click.Path(path_type=Path),
-              help='Output directory for comparison results')
+@cli.command("transcribe-compare")
+@click.argument("audio_file", type=click.Path(exists=True, path_type=Path))
+@click.option(
+    "--host",
+    "-H",
+    envvar="WHISPER_GRPC_HOST",
+    default="localhost",
+    help="Whisper gRPC host (env: WHISPER_GRPC_HOST)",
+)
+@click.option(
+    "--port",
+    "-p",
+    envvar="WHISPER_GRPC_PORT",
+    default=50051,
+    type=int,
+    help="Whisper gRPC port (env: WHISPER_GRPC_PORT)",
+)
+@click.option("--language", "-l", default="en-US", help="Language code (BCP-47 format)")
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(path_type=Path),
+    help="Output directory for comparison results",
+)
 @click.pass_context
 def transcribe_compare(
     ctx: click.Context,
@@ -1053,22 +1186,22 @@ def transcribe_compare(
     output: Optional[Path],
 ) -> None:
     """Compare transcription with different audio preprocessing methods.
-    
+
     Transcribes the same AUDIO_FILE using three preprocessing methods:
     - none: No preprocessing (raw audio)
     - ffmpeg: FFmpeg filters (bandpass + noise reduction + normalization)
     - sox: Sox noise reduction with automatic noise profiling
-    
+
     Saves separate transcript files for each method to compare accuracy.
-    
+
     Requires the NVIDIA Whisper ASR service to be running.
     """
     if not TRANSCRIPTION_AVAILABLE:
         console.print("[red]Error: Transcription dependencies not installed[/red]")
         console.print("[dim]Install with: pip install nvidia-riva-client[/dim]")
         sys.exit(1)
-    
-    cfg = ctx.obj['config']
+
+    cfg = ctx.obj["config"]
     vs = _build_variant_store(cfg)
     model_name = _get_asr_model_name(host, port)
 
@@ -1077,13 +1210,14 @@ def transcribe_compare(
     console.print(f"  Whisper service: {host}:{port}")
     console.print(f"  Language: {language}")
     console.print()
-    
+
     import shutil
+
     if not shutil.which("sox"):
         console.print("[yellow]Note: sox not found - sox preprocessing will be skipped[/yellow]")
         console.print("[dim]Install sox: apt install sox[/dim]")
         console.print()
-    
+
     results = compare_preprocessing(
         audio_path=audio_file,
         grpc_host=host,
@@ -1094,11 +1228,11 @@ def transcribe_compare(
         variant_store=vs,
         recordings_root=cfg.output_dir,
     )
-    
+
     if not results:
         console.print("[red]Comparison failed - could not connect to Whisper service[/red]")
         sys.exit(1)
-    
+
     # Print final summary
     console.print()
     console.print("[bold]Results saved:[/bold]")
@@ -1107,16 +1241,23 @@ def transcribe_compare(
             console.print(f"  [green]✓[/green] {result.transcript_file.name}")
         else:
             console.print(f"  [red]✗[/red] {method_name}: {result.error}")
-    
+
     console.print()
     console.print("[dim]Compare the transcript files to see which preprocessing works best.[/dim]")
 
 
 @cli.command("ingest-transcripts")
-@click.option('--config', '-c', type=click.Path(exists=True, path_type=Path),
-              help='Path to configuration file')
-@click.option('--recordings-dir', type=click.Path(path_type=Path),
-              help='Directory to scan for transcript JSON files')
+@click.option(
+    "--config",
+    "-c",
+    type=click.Path(exists=True, path_type=Path),
+    help="Path to configuration file",
+)
+@click.option(
+    "--recordings-dir",
+    type=click.Path(path_type=Path),
+    help="Directory to scan for transcript JSON files",
+)
 @click.pass_context
 def ingest_transcripts(
     ctx: click.Context,
@@ -1124,20 +1265,21 @@ def ingest_transcripts(
     recordings_dir: Optional[Path],
 ) -> None:
     """Backfill transcript JSON files into vector + metadata stores."""
-    cfg = load_config(config) if config else ctx.obj['config']
+    cfg = load_config(config) if config else ctx.obj["config"]
     if not getattr(cfg, "rag", None) or not cfg.rag.enabled:
         console.print("[red]Error: rag.enabled is false or missing in config[/red]")
         sys.exit(1)
 
     try:
         from .ingest import TranscriptIngestionService
+
         service = TranscriptIngestionService(cfg)
     except Exception as exc:
         console.print(f"[red]Error initializing ingestion service: {exc}[/red]")
         sys.exit(1)
 
     target_dir = recordings_dir or cfg.output_dir
-    console.print(f"[bold]Backfilling transcripts[/bold]")
+    console.print("[bold]Backfilling transcripts[/bold]")
     console.print(f"  Source: {target_dir}")
     with console.status("[bold blue]Indexing transcripts..."):
         stats = service.backfill(target_dir)
@@ -1153,13 +1295,17 @@ def ingest_transcripts(
 
 @cli.command("search")
 @click.argument("query")
-@click.option('--config', '-c', type=click.Path(exists=True, path_type=Path),
-              help='Path to configuration file')
-@click.option('--start-time', help='Filter start time (ISO-8601 UTC)')
-@click.option('--end-time', help='Filter end time (ISO-8601 UTC)')
-@click.option('--feed-id', 'feed_ids', multiple=True, help='Include only these feed IDs')
-@click.option('--exclude-feed-id', 'exclude_feed_ids', multiple=True, help='Exclude feed IDs')
-@click.option('--top-k', default=10, type=int, help='Max number of results')
+@click.option(
+    "--config",
+    "-c",
+    type=click.Path(exists=True, path_type=Path),
+    help="Path to configuration file",
+)
+@click.option("--start-time", help="Filter start time (ISO-8601 UTC)")
+@click.option("--end-time", help="Filter end time (ISO-8601 UTC)")
+@click.option("--feed-id", "feed_ids", multiple=True, help="Include only these feed IDs")
+@click.option("--exclude-feed-id", "exclude_feed_ids", multiple=True, help="Exclude feed IDs")
+@click.option("--top-k", default=10, type=int, help="Max number of results")
 @click.pass_context
 def search_cmd(
     ctx: click.Context,
@@ -1172,7 +1318,7 @@ def search_cmd(
     top_k: int,
 ) -> None:
     """Semantic transcript search with optional time/channel filters."""
-    cfg = load_config(config) if config else ctx.obj['config']
+    cfg = load_config(config) if config else ctx.obj["config"]
     if not getattr(cfg, "rag", None) or not cfg.rag.enabled:
         console.print("[red]Error: rag.enabled is false or missing in config[/red]")
         sys.exit(1)
@@ -1180,12 +1326,19 @@ def search_cmd(
     try:
         from .ingest import TranscriptIngestionService
         from .rag_models import SearchFilters
+
         service = TranscriptIngestionService(cfg)
         filters = SearchFilters(
-            start_time_utc=datetime.fromisoformat(start_time.replace("Z", "+00:00")).astimezone(timezone.utc)
-            if start_time else None,
-            end_time_utc=datetime.fromisoformat(end_time.replace("Z", "+00:00")).astimezone(timezone.utc)
-            if end_time else None,
+            start_time_utc=(
+                datetime.fromisoformat(start_time.replace("Z", "+00:00")).astimezone(timezone.utc)
+                if start_time
+                else None
+            ),
+            end_time_utc=(
+                datetime.fromisoformat(end_time.replace("Z", "+00:00")).astimezone(timezone.utc)
+                if end_time
+                else None
+            ),
             feed_ids=list(feed_ids) if feed_ids else None,
             exclude_feed_ids=list(exclude_feed_ids) if exclude_feed_ids else None,
         )
@@ -1215,12 +1368,16 @@ def search_cmd(
 
 
 @cli.command("rag-check")
-@click.option('--config', '-c', type=click.Path(exists=True, path_type=Path),
-              help='Path to configuration file')
+@click.option(
+    "--config",
+    "-c",
+    type=click.Path(exists=True, path_type=Path),
+    help="Path to configuration file",
+)
 @click.pass_context
 def rag_check(ctx: click.Context, config: Optional[Path]) -> None:
     """Check embedding and vector store connectivity."""
-    cfg = load_config(config) if config else ctx.obj['config']
+    cfg = load_config(config) if config else ctx.obj["config"]
     if not getattr(cfg, "rag", None) or not cfg.rag.enabled:
         console.print("[red]Error: rag.enabled is false or missing in config[/red]")
         sys.exit(1)
@@ -1228,6 +1385,7 @@ def rag_check(ctx: click.Context, config: Optional[Path]) -> None:
     try:
         from .embedding import create_embedding_client
         from .vector_store import create_vector_store
+
         embedding = create_embedding_client(cfg.rag.embedding)
         vector_store = create_vector_store(cfg.rag.vector_store)
     except Exception as exc:
@@ -1272,17 +1430,22 @@ def rag_check(ctx: click.Context, config: Optional[Path]) -> None:
 
 
 @cli.command("rag-api")
-@click.option('--config', '-c', type=click.Path(exists=True, path_type=Path),
-              help='Path to configuration file')
+@click.option(
+    "--config",
+    "-c",
+    type=click.Path(exists=True, path_type=Path),
+    help="Path to configuration file",
+)
 @click.pass_context
 def rag_api(ctx: click.Context, config: Optional[Path]) -> None:
     """Run HTTP search API server."""
-    cfg = load_config(config) if config else ctx.obj['config']
+    cfg = load_config(config) if config else ctx.obj["config"]
     if not getattr(cfg, "rag", None) or not cfg.rag.enabled:
         console.print("[red]Error: rag.enabled is false or missing in config[/red]")
         sys.exit(1)
     try:
         from .search_api import SearchApiServer
+
         SearchApiServer(cfg).run()
     except Exception as exc:
         console.print(f"[red]Failed to start API server: {exc}[/red]")
@@ -1290,20 +1453,25 @@ def rag_api(ctx: click.Context, config: Optional[Path]) -> None:
 
 
 @cli.command("dashboard")
-@click.option('--config', '-c', type=click.Path(exists=True, path_type=Path),
-              help='Path to configuration file')
-@click.option('--host', '-H', default='0.0.0.0', help='Dashboard bind address')
-@click.option('--port', '-p', default=8050, type=int, help='Dashboard port')
+@click.option(
+    "--config",
+    "-c",
+    type=click.Path(exists=True, path_type=Path),
+    help="Path to configuration file",
+)
+@click.option("--host", "-H", default="0.0.0.0", help="Dashboard bind address")
+@click.option("--port", "-p", default=8050, type=int, help="Dashboard port")
 @click.pass_context
 def dashboard(ctx: click.Context, config: Optional[Path], host: str, port: int) -> None:
     """Run the web dashboard for visualizing recordings and transcripts."""
-    cfg = load_config(config) if config else ctx.obj['config']
-    console.print(f"[bold]ATC Recorder Dashboard[/bold]")
+    cfg = load_config(config) if config else ctx.obj["config"]
+    console.print("[bold]ATC Recorder Dashboard[/bold]")
     console.print(f"  URL: http://{host}:{port}")
     console.print(f"  Recordings: {cfg.output_dir}")
     console.print()
     try:
         from .dashboard import run_dashboard
+
         run_dashboard(cfg, host=host, port=port)
     except KeyboardInterrupt:
         console.print("\n[yellow]Dashboard stopped[/yellow]")
@@ -1313,10 +1481,17 @@ def dashboard(ctx: click.Context, config: Optional[Path], host: str, port: int) 
 
 
 @cli.command("extract-entities")
-@click.option('--config', '-c', type=click.Path(exists=True, path_type=Path),
-              help='Path to configuration file')
-@click.option('--recordings-dir', type=click.Path(path_type=Path),
-              help='Directory to scan for transcript JSON files')
+@click.option(
+    "--config",
+    "-c",
+    type=click.Path(exists=True, path_type=Path),
+    help="Path to configuration file",
+)
+@click.option(
+    "--recordings-dir",
+    type=click.Path(path_type=Path),
+    help="Directory to scan for transcript JSON files",
+)
 @click.pass_context
 def extract_entities_cmd(
     ctx: click.Context,
@@ -1329,7 +1504,7 @@ def extract_entities_cmd(
     and frequencies into the entity_mentions table. Does not require RAG
     services — only needs the SQLite metadata database.
     """
-    cfg = load_config(config) if config else ctx.obj['config']
+    cfg = load_config(config) if config else ctx.obj["config"]
 
     # Entity extraction needs the metadata store but not the full RAG stack
     if cfg.rag and cfg.rag.vector_store:
@@ -1338,6 +1513,7 @@ def extract_entities_cmd(
         db_path = cfg.output_dir / "rag_metadata.db"
 
     from .ingest import MetadataStore
+
     store = MetadataStore(db_path)
     store.ensure_schema()
 
@@ -1387,6 +1563,7 @@ def extract_entities_cmd(
                     entities = extract_entities(text)
                     if entities:
                         import hashlib
+
                         start_s = float(seg.get("start_time", 0.0))
                         end_s = float(seg.get("end_time", start_s))
                         raw = f"{audio_file}:{idx}:{start_s:.3f}:{end_s:.3f}"
@@ -1396,7 +1573,11 @@ def extract_entities_cmd(
                         pieces = Path(audio_file).stem.split("_")
                         ts = ""
                         if len(pieces) >= 3:
-                            ts = f"{pieces[-2]}T{pieces[-1].rstrip('Z')}:00Z" if len(pieces[-1]) == 4 else ""
+                            ts = (
+                                f"{pieces[-2]}T{pieces[-1].rstrip('Z')}:00Z"
+                                if len(pieces[-1]) == 4
+                                else ""
+                            )
 
                         store.upsert_entity_mentions(doc_id, feed_id, ts, entities)
                         entities_found += len(entities)
@@ -1419,15 +1600,19 @@ def extract_entities_cmd(
 
 @cli.command("flight-track")
 @click.argument("callsign")
-@click.option('--config', '-c', type=click.Path(exists=True, path_type=Path),
-              help='Path to configuration file')
+@click.option(
+    "--config",
+    "-c",
+    type=click.Path(exists=True, path_type=Path),
+    help="Path to configuration file",
+)
 @click.pass_context
 def flight_track_cmd(ctx: click.Context, callsign: str, config: Optional[Path]) -> None:
     """Show a flight's cross-feed journey.
 
     CALLSIGN is the normalized callsign (e.g., DAL1234, N123AB).
     """
-    cfg = load_config(config) if config else ctx.obj['config']
+    cfg = load_config(config) if config else ctx.obj["config"]
 
     if cfg.rag and cfg.rag.vector_store:
         db_path = Path(cfg.rag.vector_store.sqlite_metadata_path)
@@ -1480,10 +1665,14 @@ def flight_track_cmd(ctx: click.Context, callsign: str, config: Optional[Path]) 
 
 @cli.command("position-profile")
 @click.argument("feed_id")
-@click.option('--config', '-c', type=click.Path(exists=True, path_type=Path),
-              help='Path to configuration file')
-@click.option('--start-time', help='Start time filter (ISO-8601)')
-@click.option('--end-time', help='End time filter (ISO-8601)')
+@click.option(
+    "--config",
+    "-c",
+    type=click.Path(exists=True, path_type=Path),
+    help="Path to configuration file",
+)
+@click.option("--start-time", help="Start time filter (ISO-8601)")
+@click.option("--end-time", help="End time filter (ISO-8601)")
 @click.pass_context
 def position_profile_cmd(
     ctx: click.Context,
@@ -1496,7 +1685,7 @@ def position_profile_cmd(
 
     FEED_ID is the feed identifier (e.g., kdca1_twr).
     """
-    cfg = load_config(config) if config else ctx.obj['config']
+    cfg = load_config(config) if config else ctx.obj["config"]
 
     if cfg.rag and cfg.rag.vector_store:
         db_path = Path(cfg.rag.vector_store.sqlite_metadata_path)
@@ -1514,7 +1703,9 @@ def position_profile_cmd(
 
     console.print(f"[bold]Position Profile: {feed_id}[/bold]")
     if profile.time_window_start and profile.time_window_end:
-        console.print(f"  Time range: {profile.time_window_start.strftime('%Y-%m-%d %H:%M')} – {profile.time_window_end.strftime('%Y-%m-%d %H:%M')} UTC")
+        console.print(
+            f"  Time range: {profile.time_window_start.strftime('%Y-%m-%d %H:%M')} – {profile.time_window_end.strftime('%Y-%m-%d %H:%M')} UTC"
+        )
     console.print()
 
     table = Table(title="Statistics")
@@ -1525,7 +1716,10 @@ def position_profile_cmd(
     table.add_row("Pilot segments", str(profile.pilot_segments))
     table.add_row("Unique callsigns", str(profile.unique_callsigns))
     table.add_row("Avg segment duration", f"{profile.avg_segment_duration:.1f}s")
-    table.add_row("Total talk time", f"{profile.total_talk_time:.0f}s ({profile.total_talk_time / 60:.1f} min)")
+    table.add_row(
+        "Total talk time",
+        f"{profile.total_talk_time:.0f}s ({profile.total_talk_time / 60:.1f} min)",
+    )
     console.print(table)
 
     if profile.phrases:
@@ -1548,9 +1742,15 @@ def position_profile_cmd(
 
     if profile.callsign_list:
         console.print()
-        console.print(f"[dim]Callsigns seen: {', '.join(profile.callsign_list[:30])}"
-                       + (f" ... and {len(profile.callsign_list) - 30} more" if len(profile.callsign_list) > 30 else "")
-                       + "[/dim]")
+        console.print(
+            f"[dim]Callsigns seen: {', '.join(profile.callsign_list[:30])}"
+            + (
+                f" ... and {len(profile.callsign_list) - 30} more"
+                if len(profile.callsign_list) > 30
+                else ""
+            )
+            + "[/dim]"
+        )
 
 
 @cli.group()
@@ -1579,7 +1779,6 @@ def variants_list(
         console.print("[red]Error: variant store not available[/red]")
         sys.exit(1)
 
-    from .variant_store import TranscriptVariantStore
     items = vs.list_variants(audio_file=audio_file, feed_id=feed, asr_model=model, limit=limit)
 
     if not items:
@@ -1635,7 +1834,9 @@ def variants_show(ctx: click.Context, variant_id: str, full: bool) -> None:
         elif len(matches) > 1:
             console.print(f"[yellow]Ambiguous ID prefix '{variant_id}'. Matches:[/yellow]")
             for m in matches:
-                console.print(f"  {m.variant_id[:10]}  {m.audio_file}  {m.asr_model}/{m.preprocess}")
+                console.print(
+                    f"  {m.variant_id[:10]}  {m.audio_file}  {m.asr_model}/{m.preprocess}"
+                )
             return
         else:
             console.print(f"[red]Variant not found: {variant_id}[/red]")
@@ -1660,6 +1861,7 @@ def variants_show(ctx: click.Context, variant_id: str, full: bool) -> None:
 
     if full:
         import json
+
         console.print_json(json.dumps(variant.transcript, indent=2, ensure_ascii=False))
     else:
         text = variant.transcript.get("text", "")
@@ -1709,8 +1911,12 @@ def variants_compare(ctx: click.Context, variant_a: str, variant_b: str) -> None
     vb = vs.get_variant(id_b)
 
     console.print("[bold]Variant Comparison[/bold]")
-    console.print(f"  A: {id_a[:10]}  ({va.asr_model}/{va.preprocess})  {diff.word_count_a} words, {diff.segment_count_a} segments")
-    console.print(f"  B: {id_b[:10]}  ({vb.asr_model}/{vb.preprocess})  {diff.word_count_b} words, {diff.segment_count_b} segments")
+    console.print(
+        f"  A: {id_a[:10]}  ({va.asr_model}/{va.preprocess})  {diff.word_count_a} words, {diff.segment_count_a} segments"
+    )
+    console.print(
+        f"  B: {id_b[:10]}  ({vb.asr_model}/{vb.preprocess})  {diff.word_count_b} words, {diff.segment_count_b} segments"
+    )
     console.print()
 
     if diff.unified_diff:
@@ -1813,6 +2019,7 @@ def variants_import(
         sys.exit(1)
 
     if parent:
+
         def _resolve(vid: str):
             v = vs.get_variant(vid)
             if v:
@@ -1856,12 +2063,18 @@ def variants_import(
 
 
 @variants.command("backfill")
-@click.option("--dir", "recordings_dir", type=click.Path(exists=True, path_type=Path),
-              help="Recordings directory to scan (default: from config)")
-@click.option("--model", default="whisper-large-v3",
-              help="ASR model to assign to existing transcripts")
-@click.option("--preprocess", default="unknown",
-              help="Preprocessing method to assign to existing transcripts")
+@click.option(
+    "--dir",
+    "recordings_dir",
+    type=click.Path(exists=True, path_type=Path),
+    help="Recordings directory to scan (default: from config)",
+)
+@click.option(
+    "--model", default="whisper-large-v3", help="ASR model to assign to existing transcripts"
+)
+@click.option(
+    "--preprocess", default="unknown", help="Preprocessing method to assign to existing transcripts"
+)
 @click.pass_context
 def variants_backfill(
     ctx: click.Context,
@@ -1892,5 +2105,5 @@ def variants_backfill(
     console.print(f"[green]Backfill complete: {count} new variants registered[/green]")
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     cli()

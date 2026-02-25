@@ -13,26 +13,26 @@ def setup_logging(
     log_format: Optional[str] = None,
 ) -> logging.Logger:
     """Configure logging for ATC Recorder.
-    
+
     Args:
-        level: Log level (DEBUG, INFO, WARNING, ERROR). 
+        level: Log level (DEBUG, INFO, WARNING, ERROR).
                Defaults to ATC_LOG_LEVEL env var or INFO.
         log_file: Optional file to write logs to.
         log_format: Optional custom log format.
-        
+
     Returns:
         Configured logger instance.
     """
     # Get log level from environment or parameter
     if level is None:
         level = os.environ.get("ATC_LOG_LEVEL", "INFO")
-    
+
     numeric_level = getattr(logging, level.upper(), logging.INFO)
-    
+
     # Default format includes timestamp for Docker/production use
     if log_format is None:
         log_format = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
-    
+
     # Configure root logger
     logging.basicConfig(
         level=numeric_level,
@@ -40,20 +40,20 @@ def setup_logging(
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[],
     )
-    
+
     # Get our logger
     logger = logging.getLogger("atc_recorder")
     logger.setLevel(numeric_level)
-    
+
     # Clear existing handlers
     logger.handlers.clear()
-    
+
     # Console handler (stderr for Docker compatibility)
     console_handler = logging.StreamHandler(sys.stderr)
     console_handler.setLevel(numeric_level)
     console_handler.setFormatter(logging.Formatter(log_format, datefmt="%Y-%m-%d %H:%M:%S"))
     logger.addHandler(console_handler)
-    
+
     # File handler if specified
     if log_file:
         log_file.parent.mkdir(parents=True, exist_ok=True)
@@ -61,16 +61,16 @@ def setup_logging(
         file_handler.setLevel(numeric_level)
         file_handler.setFormatter(logging.Formatter(log_format, datefmt="%Y-%m-%d %H:%M:%S"))
         logger.addHandler(file_handler)
-    
+
     return logger
 
 
 def get_logger(name: str = "atc_recorder") -> logging.Logger:
     """Get a logger instance.
-    
+
     Args:
         name: Logger name (defaults to atc_recorder).
-        
+
     Returns:
         Logger instance.
     """

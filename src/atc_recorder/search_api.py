@@ -49,10 +49,11 @@ class SearchApiServer:
                     handler_self._json_response(404, {"error": "not_found"})
                     return
                 healthy = (
-                    service.vector_store.check_health()
-                    and service.embedding_client.check_health()
+                    service.vector_store.check_health() and service.embedding_client.check_health()
                 )
-                handler_self._json_response(200 if healthy else 503, {"status": "ok" if healthy else "degraded"})
+                handler_self._json_response(
+                    200 if healthy else 503, {"status": "ok" if healthy else "degraded"}
+                )
 
             def do_POST(handler_self) -> None:  # noqa: N802
                 if handler_self.path != "/search":
@@ -101,7 +102,7 @@ class SearchApiServer:
                     handler_self._json_response(500, {"error": str(exc)})
 
             def log_message(self, format: str, *args) -> None:  # noqa: A003
-                logger.info("search-api %s - %s", handler_self.address_string(), format % args)
+                logger.info("search-api %s - %s", self.address_string(), format % args)
 
         httpd = ThreadingHTTPServer((host, port), Handler)
         logger.info("Search API listening on %s:%s", host, port)
