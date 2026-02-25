@@ -1,6 +1,5 @@
 """Archive download functionality for LiveATC.net historical recordings."""
 
-import json
 import re
 import time
 from dataclasses import dataclass
@@ -12,6 +11,7 @@ import requests
 from bs4 import BeautifulSoup
 
 from .config import Config
+from .metadata import save_metadata_entry
 from .utils import ensure_dir, get_date_string, get_liveatc_date_string
 
 
@@ -307,20 +307,6 @@ class ArchiveDownloader:
             output_file: Path to downloaded file
             size_bytes: Size of downloaded file
         """
-        metadata_file = directory / "metadata.json"
-
-        # Load existing metadata if present
-        existing = []
-        if metadata_file.exists():
-            try:
-                with open(metadata_file, "r") as f:
-                    existing = json.load(f)
-                    if not isinstance(existing, list):
-                        existing = [existing]
-            except (json.JSONDecodeError, IOError):
-                existing = []
-
-        # Create metadata entry
         metadata = {
             "feed_id": archive_file.feed_id,
             "archive_id": archive_file.archive_id,
@@ -334,13 +320,7 @@ class ArchiveDownloader:
             "downloaded_at": datetime.now(timezone.utc).isoformat(),
         }
 
-        # Check if already exists (by filename)
-        existing = [m for m in existing if m.get("file") != output_file.name]
-        existing.append(metadata)
-
-        # Save updated metadata
-        with open(metadata_file, "w") as f:
-            json.dump(existing, f, indent=2)
+        save_metadata_entry(directory, metadata)
 
 
 class ArchiveError(Exception):

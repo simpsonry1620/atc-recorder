@@ -1,6 +1,5 @@
 """Live stream recording functionality."""
 
-import json
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -10,6 +9,7 @@ from typing import Callable, Optional
 
 from .config import Config
 from .feeds import FeedDiscovery, FeedDiscoveryError
+from .metadata import save_metadata_entry
 from .utils import (
     check_ffmpeg,
     ensure_dir,
@@ -319,25 +319,7 @@ class StreamRecorder:
             directory: Directory containing recordings
             metadata: Metadata to save
         """
-        metadata_file = directory / "metadata.json"
-
-        # Load existing metadata if present
-        existing = []
-        if metadata_file.exists():
-            try:
-                with open(metadata_file, "r") as f:
-                    existing = json.load(f)
-                    if not isinstance(existing, list):
-                        existing = [existing]
-            except (json.JSONDecodeError, IOError):
-                existing = []
-
-        # Append new metadata
-        existing.append(metadata)
-
-        # Save updated metadata
-        with open(metadata_file, "w") as f:
-            json.dump(existing, f, indent=2)
+        save_metadata_entry(directory, metadata)
 
     def stop(self) -> None:
         """Request the recorder to stop after the current segment."""
