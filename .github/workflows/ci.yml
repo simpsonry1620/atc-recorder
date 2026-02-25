@@ -25,6 +25,7 @@ jobs:
       - name: Black (format check)
         run: >
           docker compose run --rm --no-deps --entrypoint sh
+          -v "$GITHUB_WORKSPACE:/app"
           atc-recorder
           -lc "pip install --no-cache-dir -q black &&
           python -m black --check src tests"
@@ -32,6 +33,7 @@ jobs:
       - name: Ruff (lint)
         run: >
           docker compose run --rm --no-deps --entrypoint sh
+          -v "$GITHUB_WORKSPACE:/app"
           atc-recorder
           -lc "pip install --no-cache-dir -q ruff &&
           python -m ruff check src tests"
@@ -39,6 +41,7 @@ jobs:
       - name: Pytest
         run: >
           docker compose run --rm --no-deps --entrypoint sh
+          -v "$GITHUB_WORKSPACE:/app"
           atc-recorder
           -lc "pip install --no-cache-dir -q pytest pytest-cov &&
           python -m pytest -q -o cache_dir=/tmp/pytest-cache"
