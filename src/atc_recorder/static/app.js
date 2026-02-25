@@ -1208,8 +1208,11 @@ function _formatParamTag(tag) {
       return `${labels[k] || k} ${v}`;
     })
     .replace(/_/g, ', ')
-    .replace(/derev/g, 'dereverb')
-    .replace(/vad/g, 'vad on');
+    .replace(/\bderev\b/g, 'dereverb')
+    .replace(/\bsuperres\b/g, 'super-res')
+    .replace(/\bstudio\b/g, 'studio voice')
+    .replace(/\bspkfocus\b/g, 'speaker focus')
+    .replace(/\bvad\b/g, 'vad on');
 }
 
 function renderLabResults(artifacts, feed, date) {
@@ -1226,33 +1229,77 @@ function renderLabResults(artifacts, feed, date) {
     const url = `/api/preprocessed/${encodeURIComponent(feed)}/${encodeURIComponent(date)}/${encodeURIComponent(a.filename)}`;
     const size = fmtBytes(a.size_bytes);
     const customBadge = a.is_custom ? '<span class="lab-custom-badge">custom</span>' : '';
-    const paramInfo = a.param_tag ? `<span class="text-xs text-yellow-400/70">${esc(_formatParamTag(a.param_tag))}</span>` : '';
+    const paramInfo = a.param_tag ? `<div class="lab-card-params">${esc(_formatParamTag(a.param_tag))}</div>` : '';
     const timeStr = a.mtime_iso || '';
     return `
-      <div class="card lab-result-card">
-        <div class="flex items-center gap-2 mb-2">
-          <span class="inline-block px-2 py-0.5 rounded text-xs font-bold uppercase
-            ${a.method === 'maxine' ? 'bg-green-900/50 text-green-400' :
-              a.method === 'none' ? 'bg-gray-800 text-gray-400' :
-              'bg-brand-900/50 text-brand-400'}">${esc(a.method)}</span>
-          ${customBadge}
-          ${paramInfo}
-          <span class="flex-1"></span>
-          <span class="text-xs text-gray-600 shrink-0">${size}</span>
-          <span class="text-xs text-gray-700 shrink-0">${esc(timeStr)}</span>
-          <button type="button" class="lab-delete-btn" data-filename="${esc(a.filename)}" title="Delete this file">
-            <svg class="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193V3.75A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z" clip-rule="evenodd"/></svg>
-          </button>
+      <div class="card lab-result-card" data-artifact="${esc(a.filename)}">
+        <div class="lab-card-header">
+          <div class="lab-card-badges">
+            <span class="lab-method-badge
+              ${a.method === 'maxine' ? 'lab-method-maxine' :
+                a.method === 'none' ? 'lab-method-none' :
+                'lab-method-other'}">${esc(a.method)}</span>
+            ${customBadge}
+          </div>
+          <div class="lab-card-actions">
+            <button type="button" class="lab-transcribe-btn" data-filename="${esc(a.filename)}" title="Run ASR on this artifact">Transcribe</button>
+            <button type="button" class="lab-delete-btn" data-filename="${esc(a.filename)}" title="Delete this file">
+              <svg class="w-3.5 h-3.5" viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M8.75 1A2.75 2.75 0 006 3.75v.443c-.795.077-1.584.176-2.365.298a.75.75 0 10.23 1.482l.149-.022.841 10.518A2.75 2.75 0 007.596 19h4.807a2.75 2.75 0 002.742-2.53l.841-10.52.149.023a.75.75 0 00.23-1.482A41.03 41.03 0 0014 4.193V3.75A2.75 2.75 0 0011.25 1h-2.5zM10 4c.84 0 1.673.025 2.5.075V3.75c0-.69-.56-1.25-1.25-1.25h-2.5c-.69 0-1.25.56-1.25 1.25v.325C8.327 4.025 9.16 4 10 4zM8.58 7.72a.75.75 0 00-1.5.06l.3 7.5a.75.75 0 101.5-.06l-.3-7.5zm4.34.06a.75.75 0 10-1.5-.06l-.3 7.5a.75.75 0 101.5.06l.3-7.5z" clip-rule="evenodd"/></svg>
+            </button>
+          </div>
         </div>
+        ${paramInfo}
+        <div class="lab-card-meta">${size} &middot; ${esc(timeStr)}</div>
         <audio controls preload="metadata" class="w-full rounded-lg">
           <source src="${url}" type="${a.ext === '.mp3' ? 'audio/mpeg' : 'audio/wav'}" />
         </audio>
+        <div class="lab-transcript-area hidden">
+          <div class="lab-transcript-text"></div>
+          <span class="lab-transcript-meta"></span>
+        </div>
       </div>`;
   }).join('');
 
   labResultsEl.querySelectorAll('.lab-delete-btn').forEach(btn => {
     btn.addEventListener('click', () => deleteLabArtifact(btn.dataset.filename));
   });
+  labResultsEl.querySelectorAll('.lab-transcribe-btn').forEach(btn => {
+    btn.addEventListener('click', () => transcribeArtifact(btn.dataset.filename));
+  });
+}
+
+async function transcribeArtifact(artifactFilename) {
+  const feed = labFeed.value, date = labDate.value, file = labFile.value;
+  if (!feed || !date || !file) return;
+
+  const model = document.getElementById('lab-asr-model').value;
+  const card = labResultsEl.querySelector(`[data-artifact="${CSS.escape(artifactFilename)}"]`);
+  const btn = card?.querySelector('.lab-transcribe-btn');
+  const area = card?.querySelector('.lab-transcript-area');
+  const textEl = card?.querySelector('.lab-transcript-text');
+  const metaEl = card?.querySelector('.lab-transcript-meta');
+
+  if (btn) { btn.textContent = 'Transcribing...'; btn.disabled = true; }
+
+  try {
+    const result = await api('/api/preprocess/transcribe', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ feed_id: feed, date, artifact_filename: artifactFilename, model }),
+    });
+    if (area && textEl) {
+      textEl.textContent = result.text || '(no text)';
+      if (metaEl) metaEl.textContent = `${result.model} | ${result.segment_count} segment(s) | ${result.elapsed_seconds}s`;
+      area.classList.remove('hidden');
+    }
+  } catch (e) {
+    if (textEl && area) {
+      textEl.textContent = `Error: ${e.message || e}`;
+      area.classList.remove('hidden');
+    }
+  } finally {
+    if (btn) { btn.textContent = 'Transcribe'; btn.disabled = false; }
+  }
 }
 
 async function deleteLabArtifact(targetFilename) {
@@ -1288,6 +1335,30 @@ async function clearAllLabArtifacts() {
 }
 
 document.getElementById('lab-clear-all').addEventListener('click', clearAllLabArtifacts);
+
+async function transcribeAllArtifacts() {
+  const cards = labResultsEl.querySelectorAll('.lab-result-card');
+  if (!cards.length) return;
+
+  const btn = document.getElementById('lab-transcribe-all');
+  const total = cards.length;
+  let done = 0;
+  btn.disabled = true;
+  btn.textContent = `0 / ${total}`;
+
+  for (const card of cards) {
+    const filename = card.dataset.artifact;
+    if (!filename) continue;
+    await transcribeArtifact(filename);
+    done++;
+    btn.textContent = `${done} / ${total}`;
+  }
+
+  btn.textContent = 'Transcribe All';
+  btn.disabled = false;
+}
+
+document.getElementById('lab-transcribe-all').addEventListener('click', transcribeAllArtifacts);
 
 // ─────────────────── Initialization ────────────────────
 loadOverview();

@@ -633,7 +633,7 @@ def create_app(config: Config) -> FastAPI:
             "intensity_ratio":      {"type": float, "min": 0.0,  "max": 1.0,  "default": 1.0},
             "effect_version":       {"type": int,   "min": 1,    "max": 2,    "default": 1},
             "enable_vad":           {"type": int,   "min": 0,    "max": 1,    "default": 0},
-            "effect":               {"type": str,   "options": ["denoiser", "dereverb_denoiser"], "default": "denoiser"},
+            "effect":               {"type": str,   "options": ["denoiser", "dereverb_denoiser", "superres", "studio_voice_high_quality"], "default": "denoiser"},
         },
     }
 
@@ -688,9 +688,17 @@ def create_app(config: Config) -> FastAPI:
             ev = params.get("effect_version", 1)
             vad = params.get("enable_vad", False)
             eff = params.get("effect", "denoiser")
+            _EFFECT_SHORT = {
+                "denoiser": "",
+                "dereverb_denoiser": "derev",
+                "superres": "superres",
+                "studio_voice_high_quality": "studio",
+                "speaker_focus": "spkfocus",
+            }
             parts = [f"i{ir}"]
-            if eff != "denoiser":
-                parts.append("derev")
+            short = _EFFECT_SHORT.get(eff, eff)
+            if short:
+                parts.append(short)
             parts.append(f"v{ev}")
             if vad:
                 parts.append("vad")
@@ -790,6 +798,77 @@ def create_app(config: Config) -> FastAPI:
         else:
             media = "audio/wav"
         return FileResponse(path, media_type=media, filename=filename)
+
+    # ── Audio Lab: transcribe preprocessed artifacts ────────────────
+    @app.post("/api/preprocess/transcribe")
+    async def transcribe_artifact(request: Request):
+        body = await request.json()
+        feed_id = str(body.get("feed_id", "")).strip()
+        date = str(body.get("date", "")).strip()
+        artifact_filename = str(body.get("artifact_filename", "")).strip()
+        model = str(body.get("model", "whisper")).strip().lower()
+
+        if not feed_id or not date or not artifact_filename:
+            raise HTTPException(400, "feed_id, date, and artifact_filename are required")
+
+        wav_path = _preprocessed_dir() / feed_id / date / artifact_filename
+        if not wav_path.exists():
+            raise HTTPException(404, f"Preprocessed artifact not found: {artifact_filename}")
+
+        host_port_by_model = {
+            "whisper": (
+                os.environ.get("WHISPER_GRPC_HOST", "whisper-asr"),
+                int(os.environ.get("WHISPER_GRPC_PORT", "50051")),
+            ),
+            "parakeet": (
+                os.environ.get("PARAKEET_GRPC_HOST", "parakeet-asr"),
+                int(os.environ.get("PARAKEET_GRPC_PORT", "50051")),
+            ),
+        }
+        if model not in host_port_by_model:
+            raise HTTPException(400, "model must be one of: whisper, parakeet")
+        grpc_host, grpc_port = host_port_by_model[model]
+
+        try:
+            from .transcribe import RIVA_AVAILABLE, WhisperClient
+        except ImportError as exc:
+            raise HTTPException(503, f"Transcription dependencies not available: {exc}")
+
+        if not RIVA_AVAILABLE:
+            raise HTTPException(
+                503,
+                "ASR client dependency missing (nvidia-riva-client)",
+            )
+
+        try:
+            client = WhisperClient(
+                grpc_host=grpc_host,
+                grpc_port=grpc_port,
+                language_code="en-US",
+            )
+            if not client.check_connection():
+                raise HTTPException(503, f"Cannot connect to ASR service at {grpc_host}:{grpc_port}")
+
+            t0 = _time.monotonic()
+            result = client.transcribe_file(wav_path)
+            elapsed = round(_time.monotonic() - t0, 2)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.exception("Audio Lab ASR transcription failed")
+            raise HTTPException(500, f"ASR execution failed: {exc}")
+
+        if not result.success:
+            raise HTTPException(500, f"Transcription failed: {result.error}")
+
+        return {
+            "success": True,
+            "model": model,
+            "artifact_filename": artifact_filename,
+            "text": result.text,
+            "segment_count": len(result.segments),
+            "elapsed_seconds": elapsed,
+        }
 
     # ── Semantic search (proxied) ───────────────────────────────────
     @app.post("/api/search")
