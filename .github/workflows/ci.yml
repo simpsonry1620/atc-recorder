@@ -36,7 +36,7 @@ jobs:
           -v "$GITHUB_WORKSPACE:/app"
           atc-recorder
           -lc "pip install --no-cache-dir -q ruff &&
-          python -m ruff check src tests"
+          python -m ruff check --cache-dir /tmp/ruff-cache src tests"
 
       - name: Pytest
         run: >
