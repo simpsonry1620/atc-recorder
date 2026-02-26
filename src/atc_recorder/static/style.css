@@ -526,3 +526,70 @@ audio {
   gap: 1rem;
   align-items: start;
 }
+
+/* ─── Workflow tab – Litegraph dark theme overrides ─── */
+.lgraphcanvas {
+  background: #0d1117 !important;
+}
+.litegraph .litecontextmenu {
+  background: #1f2937 !important;
+  border: 1px solid #374151 !important;
+  color: #e5e7eb !important;
+}
+.litegraph .litecontextmenu .litemenu-entry {
+  color: #e5e7eb !important;
+}
+.litegraph .litecontextmenu .litemenu-entry:hover {
+  background: #374151 !important;
+  color: #fff !important;
+}
+.litegraph .litecontextmenu .litemenu-entry.separator {
+  border-bottom-color: #374151 !important;
+}
+.litegraph .litesearchbox {
+  background: #1f2937 !important;
+  border: 1px solid #374151 !important;
+}
+.litegraph .litesearchbox input {
+  background: #111827 !important;
+  color: #e5e7eb !important;
+  border-color: #374151 !important;
+}
+.litegraph .litesearchbox .name {
+  color: #e5e7eb !important;
+}
+.litegraph .litesearchbox .type {
+  color: #6b7280 !important;
+}
+
+/* Workflow – secondary button */
+.btn-secondary {
+  padding: 0.5rem 0.75rem;
+  background: #1f2937;
+  color: #e5e7eb;
+  font-size: 0.875rem;
+  font-weight: 500;
+  border-radius: 0.5rem;
+  border: 1px solid #374151;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s;
+}
+.btn-secondary:hover {
+  background: #374151;
+  border-color: #4b5563;
+}
+
+/* Workflow – batch progress bar */
+.wf-progress-track {
+  width: 100%;
+  height: 0.5rem;
+  background: #1f2937;
+  border-radius: 9999px;
+  overflow: hidden;
+}
+.wf-progress-bar {
+  height: 100%;
+  background: #0d84ff;
+  border-radius: 9999px;
+  transition: width 0.3s ease;
+}

@@ -197,6 +197,7 @@ class AudioPreprocess(Enum):
     FFMPEG_VAD = "ffmpeg_vad"  # FFmpeg with VAD to remove static/silence
     SOX = "sox"  # Sox noisered with auto noise profile
     MAXINE = "maxine"  # NVIDIA Maxine Audio Effects via local CLI wrapper
+    PIPELINE = "pipeline"  # Composable pipeline (see pipeline.py)
 
 
 def _default_wav_convert(input_path: Path, output_path: Path) -> bool:
@@ -977,6 +978,8 @@ class WhisperClient:
         merge_gap_seconds: float = 0.5,
         diarization_enabled: bool = False,
         diarization_mode: str = "role-heuristic",
+        pipeline_preset: Optional[str] = None,
+        pipeline_steps: Optional[list] = None,
     ) -> TranscriptionResult:
         """Convert audio to WAV and transcribe.
 
@@ -992,6 +995,8 @@ class WhisperClient:
             silence_threshold_dB: dB level below which audio is considered silence
             min_speech_duration: Drop speech intervals shorter than this (s)
             merge_gap_seconds: Merge speech intervals separated by silence shorter than this
+            pipeline_preset: Named pipeline preset (when preprocess=pipeline)
+            pipeline_steps: Inline pipeline step list (when preprocess=pipeline)
 
         Returns:
             TranscriptionResult object
@@ -1088,6 +1093,67 @@ class WhisperClient:
                                 success=False,
                                 audio_file=audio_path,
                                 error="maxine preprocessing failed; fallback conversion failed",
+                                preprocess_requested=preprocess_requested,
+                                preprocess_applied=preprocess_applied,
+                                preprocess_fallback_chain=preprocess_fallback_chain,
+                            )
+            elif preprocess == AudioPreprocess.PIPELINE:
+                from .pipeline import (
+                    PipelineDefinition,
+                    PipelineExecutor,
+                    PipelinePresetStore,
+                    PipelineStep,
+                )
+
+                pipeline_def = None
+                if pipeline_steps:
+                    pipeline_def = PipelineDefinition(
+                        steps=[
+                            PipelineStep(step_type=s["step"], params=s.get("params", {}))
+                            for s in pipeline_steps
+                        ]
+                    )
+                elif pipeline_preset:
+                    store = PipelinePresetStore(
+                        Path(
+                            getattr(self, "_variant_store_path", None)
+                            or "./recordings/pipeline_presets.db"
+                        ).parent
+                        / "pipeline_presets.db"
+                    )
+                    pipeline_def = store.load(pipeline_preset)
+
+                if pipeline_def is None or not pipeline_def.steps:
+                    logger.info("Pipeline has no steps; raw WAV conversion for %s", audio_path.name)
+                    if not _default_wav_convert(audio_path, wav_path):
+                        return TranscriptionResult(
+                            success=False,
+                            audio_file=audio_path,
+                            error="ffmpeg conversion failed (empty pipeline)",
+                            preprocess_requested=preprocess_requested,
+                            preprocess_applied=preprocess_applied,
+                            preprocess_fallback_chain=preprocess_fallback_chain,
+                        )
+                else:
+                    step_names = " -> ".join(s.step_type for s in pipeline_def.steps)
+                    logger.info(
+                        "Running pipeline [%s] on %s", step_names, audio_path.name
+                    )
+                    executor = PipelineExecutor()
+                    success = executor.run(audio_path, pipeline_def, wav_path)
+                    if not success:
+                        preprocess_fallback_chain.append(AudioPreprocess.NONE.value)
+                        preprocess_applied = AudioPreprocess.NONE.value
+                        logger.warning(
+                            "Pipeline failed; falling back to raw conversion for %s",
+                            audio_path.name,
+                        )
+                        success = _default_wav_convert(audio_path, wav_path)
+                        if not success:
+                            return TranscriptionResult(
+                                success=False,
+                                audio_file=audio_path,
+                                error="pipeline preprocessing failed; fallback conversion failed",
                                 preprocess_requested=preprocess_requested,
                                 preprocess_applied=preprocess_applied,
                                 preprocess_fallback_chain=preprocess_fallback_chain,
@@ -1825,6 +1891,8 @@ class TranscriptionWatcher:
         variant_store: Optional[object] = None,
         preprocess_output_dir: Optional[Path] = None,
         keep_preprocessed_audio: bool = False,
+        pipeline_preset: Optional[str] = None,
+        pipeline_steps: Optional[list] = None,
     ):
         """Initialize the watcher.
 
@@ -1867,6 +1935,8 @@ class TranscriptionWatcher:
         self._variant_store = variant_store
         self._preprocess_output_dir = preprocess_output_dir
         self._keep_preprocessed_audio = keep_preprocessed_audio
+        self._pipeline_preset = pipeline_preset
+        self._pipeline_steps = pipeline_steps
         self._observer = None
         self._running = False
 
@@ -1919,6 +1989,8 @@ class TranscriptionWatcher:
                 silence_threshold_dB=self._silence_threshold_dB,
                 min_speech_duration=self._min_speech_duration,
                 merge_gap_seconds=self._merge_gap_seconds,
+                pipeline_preset=self._pipeline_preset,
+                pipeline_steps=self._pipeline_steps,
                 diarization_enabled=self._diarization_enabled,
                 diarization_mode=self._diarization_mode,
             )
@@ -2037,6 +2109,8 @@ def transcribe_file(
     asr_model: str = "unknown",
     variant_store: Optional[object] = None,
     recordings_root: Optional[Path] = None,
+    pipeline_preset: Optional[str] = None,
+    pipeline_steps: Optional[list] = None,
 ) -> TranscriptionResult:
     """Convenience function to transcribe a single file.
 
@@ -2086,6 +2160,8 @@ def transcribe_file(
         merge_gap_seconds=merge_gap_seconds,
         diarization_enabled=diarization_enabled,
         diarization_mode=diarization_mode,
+        pipeline_preset=pipeline_preset,
+        pipeline_steps=pipeline_steps,
     )
 
     if save and result.success:
@@ -2137,6 +2213,8 @@ def watch_and_transcribe(
     stitch_min_text_overlap_chars: int = 12,
     asr_model: str = "unknown",
     variant_store: Optional[object] = None,
+    pipeline_preset: Optional[str] = None,
+    pipeline_steps: Optional[list] = None,
 ) -> None:
     """Watch a directory and transcribe new audio files.
 
@@ -2193,6 +2271,8 @@ def watch_and_transcribe(
         stitch_min_text_overlap_chars=stitch_min_text_overlap_chars,
         asr_model=asr_model,
         variant_store=variant_store,
+        pipeline_preset=pipeline_preset,
+        pipeline_steps=pipeline_steps,
     )
 
     watcher.run_forever()

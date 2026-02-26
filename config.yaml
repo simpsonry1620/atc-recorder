@@ -41,7 +41,7 @@ recording:
 
 # Transcription defaults (used by transcribe-watch and CLI commands)
 transcription:
-  preprocess: ffmpeg_vad      # none | ffmpeg | ffmpeg_vad | sox | maxine
+  preprocess: ffmpeg_vad      # none | ffmpeg | ffmpeg_vad | sox | maxine | pipeline
   preprocess_output_dir: ./recordings/preprocessed
   keep_preprocessed_audio: false
   segment_by_pauses: true     # segment by silence and timestamp each segment
@@ -56,6 +56,20 @@ transcription:
   stitch_max_gap_seconds: 2.0
   stitch_min_text_overlap_chars: 12
   variant_store_path: ./recordings/transcripts.db
+  # Pipeline presets (when preprocess: pipeline)
+  # pipeline_preset: maxine-v2-vad   # use a named preset from the Workflow tab
+  # Or define inline steps:
+  # pipeline_steps:
+  #   - step: maxine
+  #     params:
+  #       effect: denoiser
+  #       effect_version: 2
+  #       intensity_ratio: 1.0
+  #       enable_vad: true
+  #   - step: normalize
+  #     params:
+  #       peak: 0.9
+  #       smoothing: 3
 
 # RAG ingestion and semantic search configuration
 rag:

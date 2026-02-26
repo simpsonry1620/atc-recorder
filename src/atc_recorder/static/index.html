@@ -6,6 +6,7 @@
   <title>ATC Recorder Dashboard</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script src="https://cdn.plot.ly/plotly-2.35.2.min.js" charset="utf-8"></script>
+  <link rel="stylesheet" href="https://unpkg.com/litegraph.js@0.7.18/css/litegraph.css" />
   <link rel="stylesheet" href="/static/style.css" />
   <script>
     tailwind.config = {
@@ -45,6 +46,9 @@
       <button class="tab-btn" data-tab="profile">Positions</button>
       <button class="tab-btn" data-tab="embeddings">Embeddings</button>
       <button class="tab-btn" data-tab="audiolab">Audio Lab</button>
+      <button class="tab-btn" data-tab="workflow">Workflow</button>
+      <button class="tab-btn" data-tab="labeling">Labeling</button>
+      <button class="tab-btn" data-tab="training">Training</button>
     </nav>
 
     <!-- Tab panels -->
@@ -307,9 +311,212 @@
         <div id="lab-results" class="lab-player-grid"></div>
       </section>
 
+      <!-- ═══════════ WORKFLOW ═══════════ -->
+      <section id="panel-workflow" class="tab-panel hidden p-6">
+        <div class="flex flex-wrap gap-4 items-end mb-4">
+          <div>
+            <label class="label">Feed</label>
+            <select id="wf-feed" class="input w-52"></select>
+          </div>
+          <div>
+            <label class="label">Date</label>
+            <select id="wf-date" class="input w-44"></select>
+          </div>
+          <div>
+            <label class="label">Recording</label>
+            <select id="wf-file" class="input w-64"></select>
+          </div>
+          <div class="flex items-end gap-2">
+            <div>
+              <label class="label">Preset</label>
+              <select id="wf-preset" class="input w-48"></select>
+            </div>
+            <button id="wf-load-preset" class="btn-primary h-10" title="Load preset into canvas">Load</button>
+            <button id="wf-save-preset" class="btn-primary h-10" title="Save current graph as preset">Save</button>
+            <button id="wf-delete-preset" class="btn-secondary h-10 text-red-400" title="Delete selected preset">Del</button>
+          </div>
+          <button id="wf-run" class="btn-primary h-10">Run Pipeline</button>
+        </div>
+
+        <div id="wf-canvas-wrap" class="relative w-full rounded-xl border border-gray-800 overflow-hidden" style="height:500px;">
+          <canvas id="wf-canvas"></canvas>
+        </div>
+
+        <div id="wf-status" class="text-sm text-gray-400 mt-3"></div>
+
+        <div id="wf-result" class="hidden mt-4">
+          <div id="wf-result-content"></div>
+        </div>
+
+        <div class="card mt-6">
+          <details id="wf-batch-details">
+            <summary class="card-title cursor-pointer select-none">Batch Run</summary>
+            <div class="mt-4 space-y-3">
+              <div class="flex flex-wrap gap-4 items-end">
+                <div>
+                  <label class="label">Feed scope</label>
+                  <select id="wf-batch-feed" class="input w-48">
+                    <option value="">All feeds</option>
+                  </select>
+                </div>
+                <div>
+                  <label class="label">Date scope</label>
+                  <select id="wf-batch-date" class="input w-40">
+                    <option value="">All dates</option>
+                  </select>
+                </div>
+                <label class="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                  <input type="checkbox" id="wf-batch-force" class="accent-brand-500" />
+                  Re-process existing transcripts
+                </label>
+                <button id="wf-batch-run" class="btn-primary h-10">Run Batch</button>
+                <button id="wf-batch-cancel" class="btn-secondary h-10 text-red-400 hidden">Cancel</button>
+              </div>
+              <div id="wf-batch-progress-wrap" class="hidden">
+                <div class="wf-progress-track">
+                  <div id="wf-batch-bar" class="wf-progress-bar" style="width:0%"></div>
+                </div>
+                <div id="wf-batch-bar-label" class="text-xs text-gray-500 mt-1">0 / 0</div>
+              </div>
+              <div id="wf-batch-status" class="text-sm text-gray-400 mt-2"></div>
+              <div id="wf-batch-errors" class="hidden mt-2 max-h-32 overflow-y-auto space-y-0.5"></div>
+            </div>
+          </details>
+        </div>
+      </section>
+
+      <!-- ═══════════ LABELING ═══════════ -->
+      <section id="panel-labeling" class="tab-panel hidden p-6">
+        <div id="lb-summary" class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6"></div>
+
+        <div class="flex flex-wrap gap-3 items-end mb-4">
+          <div>
+            <label class="label">Status</label>
+            <select id="lb-status-filter" class="input w-40">
+              <option value="">All</option>
+              <option value="pending">Pending</option>
+              <option value="accepted">Accepted</option>
+              <option value="rejected">Rejected</option>
+              <option value="verified">Verified</option>
+            </select>
+          </div>
+          <div>
+            <label class="label">Max CER</label>
+            <input id="lb-cer-max" type="number" class="input w-24" step="0.01" placeholder="0.05" />
+          </div>
+          <div>
+            <label class="label">Feed</label>
+            <input id="lb-feed-filter" type="text" class="input w-36" placeholder="all" />
+          </div>
+          <button id="lb-search" class="btn-primary h-10">Filter</button>
+          <div class="ml-auto flex gap-2">
+            <button id="lb-accept-all" class="btn-primary h-10 text-xs">Accept CER &lt; 5%</button>
+            <button id="lb-reject-high" class="btn-secondary h-10 text-xs text-red-400">Reject CER &gt; 10%</button>
+            <button id="lb-normalize" class="btn-primary h-10 text-xs">Normalize Text</button>
+            <button id="lb-export" class="btn-primary h-10 text-xs">Export Manifest</button>
+          </div>
+        </div>
+
+        <div id="lb-table-wrap" class="overflow-x-auto">
+          <table class="w-full text-sm text-left">
+            <thead class="text-xs uppercase text-gray-400 border-b border-gray-800">
+              <tr>
+                <th class="px-3 py-2">Chunk</th>
+                <th class="px-3 py-2">Feed</th>
+                <th class="px-3 py-2">Dur</th>
+                <th class="px-3 py-2">CER</th>
+                <th class="px-3 py-2">Status</th>
+                <th class="px-3 py-2">Whisper</th>
+                <th class="px-3 py-2">Parakeet</th>
+                <th class="px-3 py-2">Actions</th>
+              </tr>
+            </thead>
+            <tbody id="lb-tbody" class="divide-y divide-gray-800/50"></tbody>
+          </table>
+        </div>
+
+        <div id="lb-review" class="hidden mt-6 card">
+          <h3 class="card-title mb-3">Review Chunk</h3>
+          <div class="mb-3">
+            <audio id="lb-audio" controls class="w-full rounded-lg"></audio>
+          </div>
+          <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-3">
+            <div>
+              <label class="label">Whisper</label>
+              <div id="lb-whisper-text" class="text-sm bg-gray-800 rounded px-3 py-2 min-h-[60px]"></div>
+            </div>
+            <div>
+              <label class="label">Parakeet</label>
+              <div id="lb-parakeet-text" class="text-sm bg-gray-800 rounded px-3 py-2 min-h-[60px]"></div>
+            </div>
+          </div>
+          <div class="mb-3">
+            <label class="label">Verified Text (editable)</label>
+            <textarea id="lb-verified-text" rows="3" class="input w-full"></textarea>
+          </div>
+          <div class="flex gap-2">
+            <button id="lb-verify-btn" class="btn-primary h-9">Verify</button>
+            <button id="lb-accept-btn" class="btn-primary h-9">Accept</button>
+            <button id="lb-reject-btn" class="btn-secondary h-9 text-red-400">Reject</button>
+            <span id="lb-review-id" class="ml-auto text-xs text-gray-500"></span>
+          </div>
+        </div>
+      </section>
+
+      <!-- ═══════════ TRAINING ═══════════ -->
+      <section id="panel-training" class="tab-panel hidden p-6">
+        <div class="card mb-6">
+          <h3 class="card-title">LoRA Training Pipeline</h3>
+          <p class="text-sm text-gray-400 mt-2">Fine-tune Parakeet-TDT using LoRA adapters with labeled KDCA ATC data.</p>
+          <div class="mt-4 grid grid-cols-1 md:grid-cols-3 gap-4">
+            <div class="rounded-lg border border-gray-800 p-4">
+              <h4 class="text-sm font-semibold text-gray-300 mb-2">1. Chunk &amp; Label</h4>
+              <p class="text-xs text-gray-500">Use the CLI to chunk recordings and run dual-ASR labeling, then review in the Labeling tab.</p>
+              <code class="block mt-2 text-xs text-brand-400 bg-gray-900 rounded px-2 py-1">atc-recorder training chunk ./recordings</code>
+              <code class="block mt-1 text-xs text-brand-400 bg-gray-900 rounded px-2 py-1">atc-recorder training label</code>
+            </div>
+            <div class="rounded-lg border border-gray-800 p-4">
+              <h4 class="text-sm font-semibold text-gray-300 mb-2">2. Normalize &amp; Export</h4>
+              <p class="text-xs text-gray-500">Apply text normalization and export NeMo manifests.</p>
+              <code class="block mt-2 text-xs text-brand-400 bg-gray-900 rounded px-2 py-1">atc-recorder training normalize</code>
+              <code class="block mt-1 text-xs text-brand-400 bg-gray-900 rounded px-2 py-1">atc-recorder training manifest</code>
+            </div>
+            <div class="rounded-lg border border-gray-800 p-4">
+              <h4 class="text-sm font-semibold text-gray-300 mb-2">3. Train &amp; Benchmark</h4>
+              <p class="text-xs text-gray-500">Launch NeMo LoRA training and benchmark the result.</p>
+              <code class="block mt-2 text-xs text-brand-400 bg-gray-900 rounded px-2 py-1">docker compose --profile train up</code>
+              <code class="block mt-1 text-xs text-brand-400 bg-gray-900 rounded px-2 py-1">atc-recorder training benchmark -t test.json</code>
+            </div>
+          </div>
+        </div>
+
+        <div class="card">
+          <h3 class="card-title">Benchmark History</h3>
+          <div id="tr-benchmarks" class="mt-3">
+            <table class="w-full text-sm text-left">
+              <thead class="text-xs uppercase text-gray-400 border-b border-gray-800">
+                <tr>
+                  <th class="px-3 py-2">Run</th>
+                  <th class="px-3 py-2">Model</th>
+                  <th class="px-3 py-2">Files</th>
+                  <th class="px-3 py-2">WER</th>
+                  <th class="px-3 py-2">CER</th>
+                  <th class="px-3 py-2">Date</th>
+                </tr>
+              </thead>
+              <tbody id="tr-bench-tbody" class="divide-y divide-gray-800/50"></tbody>
+            </table>
+            <div id="tr-bench-empty" class="text-gray-500 text-center py-8">No benchmark runs yet</div>
+          </div>
+        </div>
+      </section>
+
     </main>
   </div>
 
+  <script src="https://unpkg.com/litegraph.js@0.7.18/build/litegraph.min.js"></script>
   <script src="/static/app.js"></script>
+  <script src="/static/workflow.js"></script>
+  <script src="/static/labeling.js"></script>
 </body>
 </html>

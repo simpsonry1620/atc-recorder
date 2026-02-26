@@ -1,0 +1,17 @@
+# NeMo LoRA fine-tuning container for Parakeet-TDT
+#
+# Usage:
+#   docker compose --profile train up nemo-training
+#
+# The base model is downloaded on first run via NeMo's pretrained model API.
+
+FROM nvcr.io/nvidia/nemo:latest
+
+WORKDIR /workspace
+
+RUN pip install --no-cache-dir pyyaml
+
+COPY scripts/nemo_train.sh /workspace/nemo_train.sh
+RUN chmod +x /workspace/nemo_train.sh
+
+ENTRYPOINT ["/workspace/nemo_train.sh"]

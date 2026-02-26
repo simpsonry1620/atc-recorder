@@ -21,7 +21,7 @@ class RecordingConfig:
 class TranscriptionConfig:
     """Configuration for transcription (segment-by-pauses, export format)."""
 
-    preprocess: str = "none"  # none, ffmpeg, ffmpeg_vad, sox, maxine
+    preprocess: str = "none"  # none, ffmpeg, ffmpeg_vad, sox, maxine, pipeline
     preprocess_output_dir: str = "./recordings/preprocessed"
     keep_preprocessed_audio: bool = False
     segment_by_pauses: bool = False
@@ -36,6 +36,8 @@ class TranscriptionConfig:
     stitch_max_gap_seconds: float = 2.0
     stitch_min_text_overlap_chars: int = 12
     variant_store_path: str = "./recordings/transcripts.db"
+    pipeline_preset: Optional[str] = None
+    pipeline_steps: Optional[list] = None
 
 
 @dataclass
@@ -107,6 +109,49 @@ class TrackingConfig:
 
 
 @dataclass
+class LoRAConfig:
+    """LoRA PEFT hyperparameters."""
+
+    r: int = 16
+    alpha: int = 32
+    dropout: float = 0.05
+    target_modules: list[str] = field(
+        default_factory=lambda: ["linear_q", "linear_v", "ffn"]
+    )
+
+
+@dataclass
+class LexiconConfig:
+    """Custom pronunciation lexicon for text normalization."""
+
+    waypoints: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class TrainingConfig:
+    """Configuration for LoRA fine-tuning."""
+
+    base_model: str = "stt_en_parakeet_tdt_1.1b"
+    lora: LoRAConfig = field(default_factory=LoRAConfig)
+    batch_size: int = 16
+    max_epochs: int = 50
+    learning_rate: float = 0.0001
+    output_dir: str = "./models/lora_adapters"
+    chunks_dir: str = "./recordings/chunks"
+    labels_db_path: str = "./recordings/labels.db"
+    chunks_db_path: str = "./recordings/chunks.db"
+    benchmark_db_path: str = "./recordings/benchmarks.db"
+    train_ratio: float = 0.9
+    min_chunk_duration: float = 2.0
+    max_chunk_duration: float = 15.0
+    pad_seconds: float = 0.5
+    energy_threshold: float = 500.0
+    max_cer: float = 0.05
+    lexicon: LexiconConfig = field(default_factory=LexiconConfig)
+    default_model: str = "whisper"
+
+
+@dataclass
 class Config:
     """Main configuration for ATC Recorder."""
 
@@ -117,6 +162,7 @@ class Config:
     transcription: Optional[TranscriptionConfig] = None
     rag: Optional[RagConfig] = None
     tracking: Optional[TrackingConfig] = None
+    training: Optional[TrainingConfig] = None
     request_delay: float = 1.0  # delay between requests in seconds
     user_agent: str = "ATC-Recorder/0.1.0"
 
@@ -176,6 +222,8 @@ class Config:
                 stitch_max_gap_seconds=t.get("stitch_max_gap_seconds", 2.0),
                 stitch_min_text_overlap_chars=t.get("stitch_min_text_overlap_chars", 12),
                 variant_store_path=t.get("variant_store_path", "./recordings/transcripts.db"),
+                pipeline_preset=t.get("pipeline_preset"),
+                pipeline_steps=t.get("pipeline_steps"),
             )
 
         rag_config = None
@@ -234,6 +282,41 @@ class Config:
                 ),
             )
 
+        training_config = None
+        if "training" in data:
+            tr = data["training"]
+            lora_data = tr.get("lora", {})
+            lex_data = tr.get("lexicon", {})
+            training_config = TrainingConfig(
+                base_model=tr.get("base_model", "stt_en_parakeet_tdt_1.1b"),
+                lora=LoRAConfig(
+                    r=lora_data.get("r", 16),
+                    alpha=lora_data.get("alpha", 32),
+                    dropout=lora_data.get("dropout", 0.05),
+                    target_modules=lora_data.get(
+                        "target_modules", ["linear_q", "linear_v", "ffn"]
+                    ),
+                ),
+                batch_size=tr.get("batch_size", 16),
+                max_epochs=tr.get("max_epochs", 50),
+                learning_rate=tr.get("learning_rate", 0.0001),
+                output_dir=tr.get("output_dir", "./models/lora_adapters"),
+                chunks_dir=tr.get("chunks_dir", "./recordings/chunks"),
+                labels_db_path=tr.get("labels_db_path", "./recordings/labels.db"),
+                chunks_db_path=tr.get("chunks_db_path", "./recordings/chunks.db"),
+                benchmark_db_path=tr.get("benchmark_db_path", "./recordings/benchmarks.db"),
+                train_ratio=tr.get("train_ratio", 0.9),
+                min_chunk_duration=tr.get("min_chunk_duration", 2.0),
+                max_chunk_duration=tr.get("max_chunk_duration", 15.0),
+                pad_seconds=tr.get("pad_seconds", 0.5),
+                energy_threshold=tr.get("energy_threshold", 500.0),
+                max_cer=tr.get("max_cer", 0.05),
+                lexicon=LexiconConfig(
+                    waypoints=lex_data.get("waypoints", {}),
+                ),
+                default_model=tr.get("default_model", "whisper"),
+            )
+
         output_dir = data.get("output_dir", "./recordings")
         if isinstance(output_dir, str):
             output_dir = Path(output_dir)
@@ -246,6 +329,7 @@ class Config:
             transcription=transcription_config,
             rag=rag_config,
             tracking=tracking_config,
+            training=training_config,
             request_delay=data.get("request_delay", 1.0),
             user_agent=data.get("user_agent", "ATC-Recorder/0.1.0"),
         )
@@ -287,6 +371,10 @@ class Config:
                 "stitch_min_text_overlap_chars": self.transcription.stitch_min_text_overlap_chars,
                 "variant_store_path": self.transcription.variant_store_path,
             }
+            if self.transcription.pipeline_preset is not None:
+                d["transcription"]["pipeline_preset"] = self.transcription.pipeline_preset
+            if self.transcription.pipeline_steps is not None:
+                d["transcription"]["pipeline_steps"] = self.transcription.pipeline_steps
         if self.rag is not None:
             d["rag"] = {
                 "enabled": self.rag.enabled,
@@ -327,6 +415,34 @@ class Config:
                     "extract_altitudes": self.tracking.entity_extraction.extract_altitudes,
                     "extract_frequencies": self.tracking.entity_extraction.extract_frequencies,
                     "min_confidence": self.tracking.entity_extraction.min_confidence,
+                },
+            }
+        if self.training is not None:
+            d["training"] = {
+                "base_model": self.training.base_model,
+                "lora": {
+                    "r": self.training.lora.r,
+                    "alpha": self.training.lora.alpha,
+                    "dropout": self.training.lora.dropout,
+                    "target_modules": self.training.lora.target_modules,
+                },
+                "batch_size": self.training.batch_size,
+                "max_epochs": self.training.max_epochs,
+                "learning_rate": self.training.learning_rate,
+                "output_dir": self.training.output_dir,
+                "chunks_dir": self.training.chunks_dir,
+                "labels_db_path": self.training.labels_db_path,
+                "chunks_db_path": self.training.chunks_db_path,
+                "benchmark_db_path": self.training.benchmark_db_path,
+                "train_ratio": self.training.train_ratio,
+                "min_chunk_duration": self.training.min_chunk_duration,
+                "max_chunk_duration": self.training.max_chunk_duration,
+                "pad_seconds": self.training.pad_seconds,
+                "energy_threshold": self.training.energy_threshold,
+                "max_cer": self.training.max_cer,
+                "default_model": self.training.default_model,
+                "lexicon": {
+                    "waypoints": self.training.lexicon.waypoints,
                 },
             }
         return d

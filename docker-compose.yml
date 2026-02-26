@@ -405,6 +405,143 @@ services:
       retries: 5
       start_period: 15s
 
+  # NeMo LoRA fine-tuning service - use with --profile train
+  # Requires: NVIDIA GPU (24GB+ VRAM recommended), NGC_API_KEY
+  # Generate training config first: atc-recorder training configure
+  nemo-training:
+    build:
+      context: .
+      dockerfile: Dockerfile.nemo
+    container_name: atc-nemo-training
+    profiles:
+      - train
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: 16gb
+    environment:
+      - NGC_API_KEY=${NGC_API_KEY}
+      - NEMO_TRAINING_CONFIG=/workspace/training/parakeet_lora.yaml
+    volumes:
+      - ./recordings:/workspace/recordings:ro
+      - ./models:/workspace/output
+      - ./models/lora_adapters:/workspace/training
+      - ./config.yaml:/workspace/config.yaml:ro
+    networks:
+      - atc-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "20m"
+        max-file: "5"
+
+  # LoRA-adapted Parakeet ASR inference - use with --profile asr-lora
+  # Serves the fine-tuned Parakeet model with LoRA adapter
+  parakeet-lora-asr:
+    build:
+      context: .
+      dockerfile: Dockerfile.nemo
+    container_name: atc-parakeet-lora-asr
+    profiles:
+      - asr-lora
+    runtime: nvidia
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    shm_size: 8gb
+    environment:
+      - NGC_API_KEY=${NGC_API_KEY}
+    volumes:
+      - ./models:/workspace/models:ro
+      - ./config.yaml:/workspace/config.yaml:ro
+    ports:
+      - "${NIM_LORA_HOST_GRPC_PORT:-50053}:50053"
+    networks:
+      - atc-network
+    entrypoint: ["python", "-c"]
+    command:
+      - |
+        import nemo.collections.asr as nemo_asr
+        from concurrent import futures
+        import grpc, json, wave, io, sys, os, numpy as np
+        from pathlib import Path
+
+        model_dir = Path('/workspace/models/lora_adapters')
+        adapter_files = sorted(model_dir.glob('*.nemo'))
+        if not adapter_files:
+            print('No LoRA adapter .nemo files found in /workspace/models/lora_adapters/', flush=True)
+            sys.exit(1)
+
+        adapter_path = adapter_files[-1]
+        print(f'Loading LoRA model from: {adapter_path}', flush=True)
+        model = nemo_asr.models.ASRModel.restore_from(str(adapter_path))
+        model.eval()
+        print('Model loaded, ready for inference on port 50053', flush=True)
+
+        # Simple HTTP inference server
+        from http.server import HTTPServer, BaseHTTPRequestHandler
+        import tempfile
+
+        class InferenceHandler(BaseHTTPRequestHandler):
+            def do_POST(self):
+                if self.path == '/transcribe':
+                    length = int(self.headers.get('Content-Length', 0))
+                    audio_data = self.rfile.read(length)
+                    with tempfile.NamedTemporaryFile(suffix='.wav', delete=False) as f:
+                        f.write(audio_data)
+                        tmp_path = f.name
+                    try:
+                        transcription = model.transcribe([tmp_path])
+                        text = transcription[0] if transcription else ''
+                        resp = json.dumps({'text': text}).encode()
+                        self.send_response(200)
+                        self.send_header('Content-Type', 'application/json')
+                        self.end_headers()
+                        self.wfile.write(resp)
+                    finally:
+                        os.unlink(tmp_path)
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def do_GET(self):
+                if self.path == '/health':
+                    self.send_response(200)
+                    self.send_header('Content-Type', 'application/json')
+                    self.end_headers()
+                    self.wfile.write(b'{"status":"ready"}')
+                else:
+                    self.send_response(404)
+                    self.end_headers()
+
+            def log_message(self, format, *args):
+                pass
+
+        server = HTTPServer(('0.0.0.0', 50053), InferenceHandler)
+        print('LoRA inference server listening on :50053', flush=True)
+        server.serve_forever()
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:50053/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "5"
+
 networks:
   atc-network:
     driver: bridge

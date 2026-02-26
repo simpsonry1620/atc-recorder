@@ -6,7 +6,9 @@ import re
 import shutil
 import socket
 import sqlite3
+import threading
 import time as _time
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -1207,6 +1209,675 @@ def create_app(config: Config) -> FastAPI:
             raise HTTPException(503, "Metadata store not available")
         summaries = profiler.summary_all_feeds(start_time=start_time, end_time=end_time)
         return {"feeds": summaries, "count": len(summaries)}
+
+    # ── Pipeline workflow endpoints ───────────────────────────────
+    def _pipeline_store():
+        from .pipeline import PipelinePresetStore
+
+        base = Path(
+            config.transcription.variant_store_path
+            if config.transcription
+            else "./recordings/transcripts.db"
+        ).parent
+        return PipelinePresetStore(base / "pipeline_presets.db")
+
+    @app.get("/api/pipeline/steps")
+    async def pipeline_step_schema():
+        from .pipeline import STEP_PARAM_SCHEMA
+
+        return {"steps": STEP_PARAM_SCHEMA}
+
+    @app.post("/api/pipeline/run")
+    async def pipeline_run(request: Request):
+        body = await request.json()
+        feed_id = str(body.get("feed_id", "")).strip()
+        date = str(body.get("date", "")).strip()
+        filename = str(body.get("filename", "")).strip()
+        steps_raw = body.get("steps", [])
+        preset_name = str(body.get("preset", "")).strip()
+
+        if not feed_id or not date or not filename:
+            raise HTTPException(400, "feed_id, date, and filename are required")
+
+        if not filename.endswith(".mp3"):
+            filename = f"{filename}.mp3"
+        audio_path = recordings / feed_id / date / filename
+        if not audio_path.exists():
+            raise HTTPException(404, f"Audio file not found: {filename}")
+
+        from .pipeline import (
+            PipelineDefinition,
+            PipelineExecutor,
+            PipelineStep,
+        )
+
+        if steps_raw:
+            pipeline_def = PipelineDefinition(
+                steps=[
+                    PipelineStep(step_type=s["step"], params=s.get("params", {}))
+                    for s in steps_raw
+                ]
+            )
+        elif preset_name:
+            store = _pipeline_store()
+            pipeline_def = store.load(preset_name)
+            if pipeline_def is None:
+                raise HTTPException(404, f"Pipeline preset not found: {preset_name}")
+        else:
+            raise HTTPException(400, "Either steps or preset is required")
+
+        stem = Path(filename).stem
+        step_tag = "_".join(s.step_type for s in pipeline_def.steps) or "none"
+        out_dir = _preprocessed_dir() / feed_id / date
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"{stem}_pipeline_{step_tag}.wav"
+
+        executor = PipelineExecutor()
+        t0 = _time.monotonic()
+        try:
+            ok = executor.run(audio_path, pipeline_def, out_path)
+            elapsed = round(_time.monotonic() - t0, 2)
+        except Exception as exc:
+            elapsed = round(_time.monotonic() - t0, 2)
+            raise HTTPException(500, f"Pipeline execution failed: {exc}")
+
+        if not ok:
+            raise HTTPException(500, "Pipeline execution failed")
+
+        return {
+            "success": True,
+            "filename": out_path.name,
+            "size_bytes": out_path.stat().st_size if out_path.exists() else 0,
+            "elapsed_seconds": elapsed,
+            "steps": [s.step_type for s in pipeline_def.steps],
+        }
+
+    @app.get("/api/pipeline/presets")
+    async def pipeline_presets_list():
+        store = _pipeline_store()
+        return {"presets": store.list_all()}
+
+    @app.post("/api/pipeline/presets")
+    async def pipeline_presets_save(request: Request):
+        body = await request.json()
+        name = str(body.get("name", "")).strip()
+        steps_raw = body.get("steps", [])
+        graph_json = body.get("graph_json")
+
+        if not name:
+            raise HTTPException(400, "name is required")
+        if not steps_raw:
+            raise HTTPException(400, "steps list is required")
+
+        from .pipeline import PipelineDefinition, PipelineStep
+
+        pipeline_def = PipelineDefinition(
+            name=name,
+            steps=[
+                PipelineStep(step_type=s["step"], params=s.get("params", {}))
+                for s in steps_raw
+            ],
+            graph_json=graph_json,
+        )
+        store = _pipeline_store()
+        store.save(name, pipeline_def)
+        return {"success": True, "name": name}
+
+    @app.get("/api/pipeline/presets/{name}")
+    async def pipeline_presets_load(name: str):
+        store = _pipeline_store()
+        data = store.load_full(name)
+        if data is None:
+            raise HTTPException(404, f"Preset not found: {name}")
+        return data
+
+    @app.delete("/api/pipeline/presets/{name}")
+    async def pipeline_presets_delete(name: str):
+        store = _pipeline_store()
+        deleted = store.delete(name)
+        if not deleted:
+            raise HTTPException(404, "Preset not found or is a built-in preset")
+        return {"success": True, "name": name}
+
+    @app.post("/api/pipeline/presets/{name}/activate")
+    async def pipeline_presets_activate(name: str):
+        store = _pipeline_store()
+        preset = store.load(name)
+        if preset is None:
+            raise HTTPException(404, f"Preset not found: {name}")
+        return {
+            "success": True,
+            "name": name,
+            "message": f"Set preprocess: pipeline and pipeline_preset: {name} in config.yaml to use in production",
+        }
+
+    # ── Full pipeline execution (preprocess + ASR + ingest) ────
+    def _execute_single_file(
+        audio_path: Path,
+        steps_raw: list,
+        asr_cfg: dict,
+        embed: bool,
+        recordings_root: Path,
+    ) -> dict:
+        """Run preprocess -> ASR -> save -> ingest for one file.
+
+        Returns a result dict.  Raises on fatal errors.
+        """
+        import tempfile
+
+        from .pipeline import PipelineDefinition, PipelineExecutor, PipelineStep
+
+        trans_cfg = getattr(config, "transcription", None)
+        segment_by_pauses = asr_cfg.get(
+            "segment_by_pauses",
+            trans_cfg.segment_by_pauses if trans_cfg else False,
+        )
+        min_silence_duration = trans_cfg.min_silence_duration if trans_cfg else 0.5
+        silence_threshold_dB = trans_cfg.silence_threshold_dB if trans_cfg else -30.0
+        min_speech_duration = trans_cfg.min_speech_duration if trans_cfg else 0.3
+        merge_gap_seconds = trans_cfg.merge_gap_seconds if trans_cfg else 0.5
+        output_format = trans_cfg.output_format if trans_cfg else "json"
+        diarization_enabled = trans_cfg.diarization_enabled if trans_cfg else False
+        diarization_mode = trans_cfg.diarization_mode if trans_cfg else "role-heuristic"
+        stitch_across_files = trans_cfg.stitch_across_files if trans_cfg else False
+        stitch_max_gap_seconds = trans_cfg.stitch_max_gap_seconds if trans_cfg else 2.0
+        stitch_min_text_overlap_chars = (
+            trans_cfg.stitch_min_text_overlap_chars if trans_cfg else 12
+        )
+
+        model = asr_cfg.get("model", "whisper")
+        host_port_by_model = {
+            "whisper": (
+                os.environ.get("WHISPER_GRPC_HOST", "whisper-asr"),
+                int(os.environ.get("WHISPER_GRPC_PORT", "50051")),
+            ),
+            "parakeet": (
+                os.environ.get("PARAKEET_GRPC_HOST", "parakeet-asr"),
+                int(os.environ.get("PARAKEET_GRPC_PORT", "50051")),
+            ),
+        }
+        grpc_host, grpc_port = host_port_by_model.get(
+            model, host_port_by_model["whisper"]
+        )
+
+        from .transcribe import (
+            AudioPreprocess,
+            WhisperClient,
+            save_transcript,
+            stitch_transcript_boundary_with_previous,
+            refresh_result_from_saved_transcript,
+            export_timestamped_txt,
+            export_srt,
+        )
+
+        # 1) Preprocess — save as persistent artifact
+        preprocessed_path = None
+        preprocessed_filename = None
+        try:
+            if steps_raw:
+                pipeline_def = PipelineDefinition(
+                    steps=[
+                        PipelineStep(step_type=s["step"], params=s.get("params", {}))
+                        for s in steps_raw
+                    ]
+                )
+                rel = audio_path.parent.resolve()
+                try:
+                    rel = rel.relative_to(recordings_root.resolve())
+                except Exception:
+                    rel = Path()
+                out_dir = _preprocessed_dir() / rel
+                out_dir.mkdir(parents=True, exist_ok=True)
+                step_tag = "_".join(s["step"] for s in steps_raw) or "none"
+                stem = audio_path.stem
+                preprocessed_path = out_dir / f"{stem}_pipeline_{step_tag}.wav"
+                preprocessed_filename = preprocessed_path.name
+
+                executor = PipelineExecutor()
+                ok = executor.run(audio_path, pipeline_def, preprocessed_path)
+                if not ok:
+                    raise RuntimeError("Pipeline preprocessing failed")
+
+            # 2) ASR
+            client = WhisperClient(
+                grpc_host=grpc_host,
+                grpc_port=grpc_port,
+                language_code="en-US",
+            )
+            if not client.check_connection():
+                raise RuntimeError(
+                    f"Cannot connect to ASR service at {grpc_host}:{grpc_port}"
+                )
+
+            if preprocessed_path:
+                result = client.convert_and_transcribe(
+                    audio_path=preprocessed_path,
+                    preprocess=AudioPreprocess.NONE,
+                    segment_by_pauses=segment_by_pauses,
+                    min_silence_duration=min_silence_duration,
+                    silence_threshold_dB=silence_threshold_dB,
+                    min_speech_duration=min_speech_duration,
+                    merge_gap_seconds=merge_gap_seconds,
+                    diarization_enabled=diarization_enabled,
+                    diarization_mode=diarization_mode,
+                )
+                result.audio_file = audio_path
+            else:
+                result = client.convert_and_transcribe(
+                    audio_path=audio_path,
+                    preprocess=AudioPreprocess.NONE,
+                    segment_by_pauses=segment_by_pauses,
+                    min_silence_duration=min_silence_duration,
+                    silence_threshold_dB=silence_threshold_dB,
+                    min_speech_duration=min_speech_duration,
+                    merge_gap_seconds=merge_gap_seconds,
+                    diarization_enabled=diarization_enabled,
+                    diarization_mode=diarization_mode,
+                )
+
+            if not result.success:
+                raise RuntimeError(f"ASR failed: {result.error}")
+
+            # 3) Save transcript
+            save_transcript(result, recordings_root=recordings_root)
+            if result.transcript_file and stitch_across_files:
+                stitched = stitch_transcript_boundary_with_previous(
+                    result.transcript_file,
+                    max_gap_seconds=stitch_max_gap_seconds,
+                    min_text_overlap_chars=stitch_min_text_overlap_chars,
+                )
+                if stitched:
+                    refresh_result_from_saved_transcript(result)
+            if output_format == "timestamped-txt":
+                export_timestamped_txt(result)
+            elif output_format == "srt":
+                export_srt(result)
+
+            # 4) Ingest
+            ingest_stats = None
+            if embed and config.rag and config.rag.enabled and result.transcript_file:
+                try:
+                    from .ingest import TranscriptIngestionService
+
+                    svc = TranscriptIngestionService(config)
+                    stats = svc.ingest_transcript(result.transcript_file)
+                    ingest_stats = {
+                        "docs_upserted": stats.docs_upserted,
+                        "errors": stats.errors,
+                    }
+                except Exception as exc:
+                    logger.warning("Ingest failed for %s: %s", audio_path.name, exc)
+                    ingest_stats = {"docs_upserted": 0, "errors": 1, "error": str(exc)}
+
+            return {
+                "success": True,
+                "audio_file": audio_path.name,
+                "preprocessed_file": preprocessed_filename,
+                "transcript_file": (
+                    str(result.transcript_file) if result.transcript_file else None
+                ),
+                "segment_count": len(result.segments),
+                "segments": result.segments,
+                "text_preview": (result.text or "")[:300],
+                "ingest": ingest_stats,
+            }
+        except Exception:
+            raise
+
+    @app.post("/api/pipeline/execute")
+    async def pipeline_execute(request: Request):
+        body = await request.json()
+        feed_id = str(body.get("feed_id", "")).strip()
+        date = str(body.get("date", "")).strip()
+        filename = str(body.get("filename", "")).strip()
+        steps_raw = body.get("steps", [])
+        asr_cfg = body.get("asr", {})
+        embed = bool(body.get("embed", False))
+
+        if not feed_id or not date or not filename:
+            raise HTTPException(400, "feed_id, date, and filename are required")
+        if not asr_cfg:
+            raise HTTPException(400, "asr config is required")
+
+        if not filename.endswith(".mp3"):
+            filename = f"{filename}.mp3"
+        audio_path = recordings / feed_id / date / filename
+        if not audio_path.exists():
+            raise HTTPException(404, f"Audio file not found: {filename}")
+
+        try:
+            from .transcribe import RIVA_AVAILABLE
+        except ImportError:
+            raise HTTPException(503, "Transcription dependencies not available")
+        if not RIVA_AVAILABLE:
+            raise HTTPException(503, "ASR client dependency missing (nvidia-riva-client)")
+
+        t0 = _time.monotonic()
+        try:
+            result = _execute_single_file(
+                audio_path, steps_raw, asr_cfg, embed, recordings
+            )
+            result["elapsed_seconds"] = round(_time.monotonic() - t0, 2)
+            return result
+        except Exception as exc:
+            logger.exception("Pipeline execute failed for %s", filename)
+            raise HTTPException(500, f"Pipeline execution failed: {exc}")
+
+    # ── Batch pipeline execution ───────────────────────────────
+    _batch_jobs: dict[str, dict] = {}
+
+    def _scan_files_for_batch(scope: dict, force: bool) -> list[Path]:
+        """Scan recording files filtered by scope."""
+        from .transcribe import find_untranscribed_files, find_audio_files
+
+        feed_filter = scope.get("feed_id", "").strip()
+        date_filter = scope.get("date", "").strip()
+
+        if feed_filter and date_filter:
+            scan_dir = recordings / feed_filter / date_filter
+        elif feed_filter:
+            scan_dir = recordings / feed_filter
+        else:
+            scan_dir = recordings
+
+        if not scan_dir.is_dir():
+            return []
+
+        if force:
+            return find_audio_files(scan_dir)
+        return find_untranscribed_files(scan_dir)
+
+    def _run_batch_thread(batch_id: str, files: list[Path], body: dict):
+        job = _batch_jobs[batch_id]
+        steps_raw = body.get("steps", [])
+        asr_cfg = body.get("asr", {})
+        embed = bool(body.get("embed", False))
+
+        for i, audio_path in enumerate(files):
+            if job["cancelled"]:
+                job["status"] = "cancelled"
+                return
+
+            job["current_file"] = audio_path.name
+            job["current_index"] = i
+
+            try:
+                _execute_single_file(
+                    audio_path, steps_raw, asr_cfg, embed, recordings
+                )
+                job["completed"] += 1
+            except Exception as exc:
+                job["failed"] += 1
+                job["errors"].append({"file": audio_path.name, "error": str(exc)})
+                logger.warning("Batch item failed %s: %s", audio_path.name, exc)
+
+        job["status"] = "completed"
+        job["current_file"] = None
+
+    @app.post("/api/pipeline/batch")
+    async def pipeline_batch_start(request: Request):
+        body = await request.json()
+        asr_cfg = body.get("asr", {})
+        if not asr_cfg:
+            raise HTTPException(400, "asr config is required")
+
+        try:
+            from .transcribe import RIVA_AVAILABLE
+        except ImportError:
+            raise HTTPException(503, "Transcription dependencies not available")
+        if not RIVA_AVAILABLE:
+            raise HTTPException(503, "ASR client dependency missing (nvidia-riva-client)")
+
+        scope = body.get("scope", {})
+        force = bool(body.get("force", False))
+
+        files = _scan_files_for_batch(scope, force)
+        if not files:
+            return {"batch_id": None, "total": 0, "status": "no_files"}
+
+        batch_id = uuid.uuid4().hex[:12]
+        _batch_jobs[batch_id] = {
+            "status": "running",
+            "total": len(files),
+            "completed": 0,
+            "failed": 0,
+            "current_file": None,
+            "current_index": 0,
+            "errors": [],
+            "cancelled": False,
+        }
+
+        thread = threading.Thread(
+            target=_run_batch_thread,
+            args=(batch_id, files, body),
+            daemon=True,
+        )
+        thread.start()
+
+        return {"batch_id": batch_id, "total": len(files), "status": "running"}
+
+    @app.get("/api/pipeline/batch/{batch_id}")
+    async def pipeline_batch_status(batch_id: str):
+        job = _batch_jobs.get(batch_id)
+        if job is None:
+            raise HTTPException(404, "Batch job not found")
+        return {
+            "batch_id": batch_id,
+            "status": job["status"],
+            "total": job["total"],
+            "completed": job["completed"],
+            "failed": job["failed"],
+            "current_file": job["current_file"],
+            "errors": job["errors"][-20:],
+        }
+
+    @app.post("/api/pipeline/batch/{batch_id}/cancel")
+    async def pipeline_batch_cancel(batch_id: str):
+        job = _batch_jobs.get(batch_id)
+        if job is None:
+            raise HTTPException(404, "Batch job not found")
+        job["cancelled"] = True
+        return {"batch_id": batch_id, "cancelled": True}
+
+    # -------------------------------------------------------------------
+    # Labeling API endpoints
+    # -------------------------------------------------------------------
+
+    def _get_label_store():
+        from .labeling import LabelStore
+        tcfg = config.training
+        if tcfg is None:
+            from .config import TrainingConfig
+            tcfg = TrainingConfig()
+        return LabelStore(Path(tcfg.labels_db_path))
+
+    def _get_chunk_store():
+        from .chunker import ChunkStore
+        tcfg = config.training
+        if tcfg is None:
+            from .config import TrainingConfig
+            tcfg = TrainingConfig()
+        return ChunkStore(Path(tcfg.chunks_db_path))
+
+    @app.get("/api/labeling/summary")
+    async def labeling_summary():
+        return _get_label_store().summary()
+
+    @app.get("/api/labeling/chunks")
+    async def labeling_chunks(
+        status: Optional[str] = None,
+        feed_id: Optional[str] = None,
+        min_cer: Optional[float] = None,
+        max_cer: Optional[float] = None,
+        limit: int = Query(default=100, le=1000),
+        offset: int = 0,
+    ):
+        ls = _get_label_store()
+        chunks = ls.list_chunks(
+            status=status, feed_id=feed_id,
+            min_cer=min_cer, max_cer=max_cer,
+            limit=limit, offset=offset,
+        )
+        return [
+            {
+                "chunk_id": c.chunk_id,
+                "audio_path": c.audio_path,
+                "feed_id": c.feed_id,
+                "date": c.date,
+                "duration": c.duration,
+                "whisper_text": c.whisper_text,
+                "parakeet_text": c.parakeet_text,
+                "consensus_text": c.consensus_text,
+                "cer": round(c.cer, 4),
+                "status": c.status,
+                "verified_text": c.verified_text,
+                "spoken_text": c.spoken_text,
+                "verified_by": c.verified_by,
+                "updated_at": c.updated_at,
+            }
+            for c in chunks
+        ]
+
+    @app.get("/api/labeling/chunk/{chunk_id}")
+    async def labeling_chunk_detail(chunk_id: str):
+        chunk = _get_label_store().get_chunk(chunk_id)
+        if chunk is None:
+            raise HTTPException(404, "Chunk not found")
+        return {
+            "chunk_id": chunk.chunk_id,
+            "audio_path": chunk.audio_path,
+            "feed_id": chunk.feed_id,
+            "date": chunk.date,
+            "duration": chunk.duration,
+            "whisper_text": chunk.whisper_text,
+            "parakeet_text": chunk.parakeet_text,
+            "consensus_text": chunk.consensus_text,
+            "cer": round(chunk.cer, 4),
+            "status": chunk.status,
+            "verified_text": chunk.verified_text,
+            "spoken_text": chunk.spoken_text,
+            "verified_by": chunk.verified_by,
+            "created_at": chunk.created_at,
+            "updated_at": chunk.updated_at,
+        }
+
+    @app.patch("/api/labeling/chunk/{chunk_id}")
+    async def labeling_chunk_update(chunk_id: str, request: Request):
+        body = await request.json()
+        ls = _get_label_store()
+        status = body.get("status", "")
+        verified_text = body.get("verified_text", "")
+        verified_by = body.get("verified_by", "dashboard")
+        ok = ls.update_status(chunk_id, status, verified_text, verified_by)
+        if not ok:
+            raise HTTPException(400, "Update failed")
+        return {"ok": True}
+
+    @app.post("/api/labeling/batch")
+    async def labeling_batch(request: Request):
+        body = await request.json()
+        ls = _get_label_store()
+        action = body.get("action", "")
+
+        if action == "accept_by_cer":
+            max_cer = float(body.get("max_cer", 0.05))
+            count = ls.batch_accept_by_cer(max_cer, verified_by="dashboard")
+            return {"action": action, "updated": count}
+        elif action == "reject_by_cer":
+            min_cer = float(body.get("min_cer", 0.10))
+            count = ls.batch_reject_by_cer(min_cer, verified_by="dashboard")
+            return {"action": action, "updated": count}
+        elif action == "update_status":
+            chunk_ids = body.get("chunk_ids", [])
+            status = body.get("status", "")
+            count = ls.batch_update_status(chunk_ids, status, verified_by="dashboard")
+            return {"action": action, "updated": count}
+        else:
+            raise HTTPException(400, f"Unknown action: {action}")
+
+    @app.get("/api/labeling/audio/{chunk_id}")
+    async def labeling_audio(chunk_id: str):
+        chunk = _get_label_store().get_chunk(chunk_id)
+        if chunk is None:
+            raise HTTPException(404, "Chunk not found")
+        audio_path = Path(chunk.audio_path)
+        if not audio_path.exists():
+            raise HTTPException(404, "Audio file not found")
+        return FileResponse(audio_path, media_type="audio/wav")
+
+    # -------------------------------------------------------------------
+    # Training / Benchmark API endpoints
+    # -------------------------------------------------------------------
+
+    @app.get("/api/training/benchmarks")
+    async def training_benchmarks(model: Optional[str] = None, limit: int = 20):
+        from .evaluation import BenchmarkStore
+        tcfg = config.training
+        if tcfg is None:
+            from .config import TrainingConfig
+            tcfg = TrainingConfig()
+        store = BenchmarkStore(Path(tcfg.benchmark_db_path))
+        return store.list_runs(model=model, limit=limit)
+
+    @app.get("/api/training/benchmarks/{run_id}")
+    async def training_benchmark_detail(run_id: int):
+        from .evaluation import BenchmarkStore
+        tcfg = config.training
+        if tcfg is None:
+            from .config import TrainingConfig
+            tcfg = TrainingConfig()
+        store = BenchmarkStore(Path(tcfg.benchmark_db_path))
+        report = store.get_report(run_id)
+        if report is None:
+            raise HTTPException(404, "Benchmark run not found")
+        return report
+
+    @app.post("/api/training/manifest")
+    async def training_manifest_export(request: Request):
+        from .labeling import LabelStore
+        from .training import export_manifests
+        tcfg = config.training
+        if tcfg is None:
+            from .config import TrainingConfig
+            tcfg = TrainingConfig()
+        ls = LabelStore(Path(tcfg.labels_db_path))
+        chunks = ls.get_verified_chunks()
+        if not chunks:
+            return {"error": "No verified chunks", "total": 0}
+        out_dir = Path(tcfg.output_dir) / "manifests"
+        train_path, val_path, stats = export_manifests(
+            chunks, out_dir,
+            train_ratio=tcfg.train_ratio,
+            min_duration=tcfg.min_chunk_duration,
+            max_duration=tcfg.max_chunk_duration,
+        )
+        return {
+            "train_manifest": str(train_path),
+            "val_manifest": str(val_path),
+            **stats,
+        }
+
+    @app.post("/api/labeling/normalize")
+    async def labeling_normalize(request: Request):
+        from .labeling import LabelStore
+        from .text_norm import TextNormalizer
+        tcfg = config.training
+        if tcfg is None:
+            from .config import TrainingConfig
+            tcfg = TrainingConfig()
+        ls = LabelStore(Path(tcfg.labels_db_path))
+        waypoints = tcfg.lexicon.waypoints if tcfg.lexicon else {}
+        normalizer = TextNormalizer(waypoint_map=waypoints)
+        chunks = ls.get_verified_chunks()
+        count = 0
+        for chunk in chunks:
+            source = chunk.verified_text or chunk.consensus_text
+            if not source:
+                continue
+            spoken = normalizer.to_spoken(source)
+            ls.update_spoken_text(chunk.chunk_id, spoken)
+            count += 1
+        return {"normalized": count}
 
     return app
 

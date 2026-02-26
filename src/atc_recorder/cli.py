@@ -631,9 +631,14 @@ def check(quiet: bool, strict: bool) -> None:
 @click.option("--no-save", is_flag=True, help="Do not save transcript to file")
 @click.option(
     "--preprocess",
-    type=click.Choice(["none", "ffmpeg", "ffmpeg_vad", "sox", "maxine"]),
+    type=click.Choice(["none", "ffmpeg", "ffmpeg_vad", "sox", "maxine", "pipeline"]),
     default=None,
     help="Audio preprocessing mode (default: from config, fallback none)",
+)
+@click.option(
+    "--pipeline-preset",
+    default=None,
+    help="Named pipeline preset (when --preprocess=pipeline)",
 )
 @click.option(
     "--segment-by-pauses", is_flag=True, help="Segment by silence and timestamp each segment"
@@ -682,6 +687,7 @@ def transcribe(
     check_only: bool,
     no_save: bool,
     preprocess: Optional[str],
+    pipeline_preset: Optional[str],
     segment_by_pauses: bool,
     min_silence_duration: float,
     silence_db: float,
@@ -729,11 +735,18 @@ def transcribe(
     preprocess_mode = _resolve_preprocess(preprocess_value)
     preprocess_output_dir = Path(trans_cfg.preprocess_output_dir) if trans_cfg else None
     keep_preprocessed_audio = bool(trans_cfg.keep_preprocessed_audio) if trans_cfg else False
+    resolved_pipeline_preset = (
+        pipeline_preset
+        or (trans_cfg.pipeline_preset if trans_cfg else None)
+    )
+    resolved_pipeline_steps = trans_cfg.pipeline_steps if trans_cfg else None
 
     console.print(f"[bold]Transcribing: {audio_file}[/bold]")
     console.print(f"  Service: {host}:{port}")
     console.print(f"  Language: {language}")
     console.print(f"  Preprocess: {preprocess_mode.value}")
+    if preprocess_mode.value == "pipeline" and resolved_pipeline_preset:
+        console.print(f"  Pipeline preset: {resolved_pipeline_preset}")
     if keep_preprocessed_audio:
         console.print(f"  Preprocess artifacts: {preprocess_output_dir}")
     console.print()
@@ -755,6 +768,8 @@ def transcribe(
             periodic_timestamp_interval_sec=periodic_markers,
             diarization_enabled=diarization,
             stitch_across_files=stitch_across_files,
+            pipeline_preset=resolved_pipeline_preset,
+            pipeline_steps=resolved_pipeline_steps,
         )
 
     if result.success:
@@ -809,9 +824,14 @@ def transcribe(
 @click.option("--language", "-l", default="en-US", help="Language code (BCP-47 format)")
 @click.option(
     "--preprocess",
-    type=click.Choice(["none", "ffmpeg", "ffmpeg_vad", "sox", "maxine"]),
+    type=click.Choice(["none", "ffmpeg", "ffmpeg_vad", "sox", "maxine", "pipeline"]),
     default=None,
     help="Audio preprocessing mode (default: from config, fallback none)",
+)
+@click.option(
+    "--pipeline-preset",
+    default=None,
+    help="Named pipeline preset (when --preprocess=pipeline)",
 )
 @click.pass_context
 def transcribe_watch(
@@ -821,6 +841,7 @@ def transcribe_watch(
     port: int,
     language: str,
     preprocess: Optional[str],
+    pipeline_preset: Optional[str],
 ) -> None:
     """Watch for new recordings and transcribe them automatically.
 
@@ -865,12 +886,19 @@ def transcribe_watch(
     stitch_min_text_overlap_chars = trans.stitch_min_text_overlap_chars if trans else 12
     preprocess_output_dir = Path(trans.preprocess_output_dir) if trans else None
     keep_preprocessed_audio = bool(trans.keep_preprocessed_audio) if trans else False
+    resolved_pipeline_preset = (
+        pipeline_preset
+        or (trans.pipeline_preset if trans else None)
+    )
+    resolved_pipeline_steps = trans.pipeline_steps if trans else None
 
     console.print("[bold]ATC Transcription Watcher[/bold]")
     console.print(f"  Watch directory: {watch_dir}")
     console.print(f"  Whisper service: {host}:{port}")
     console.print(f"  Language: {language}")
     console.print(f"  Preprocess: {preprocess_mode.value}")
+    if preprocess_mode.value == "pipeline" and resolved_pipeline_preset:
+        console.print(f"  Pipeline preset: {resolved_pipeline_preset}")
     if keep_preprocessed_audio:
         console.print(f"  Preprocess artifacts: {preprocess_output_dir}")
     if segment_by_pauses:
@@ -908,6 +936,8 @@ def transcribe_watch(
             stitch_min_text_overlap_chars=stitch_min_text_overlap_chars,
             asr_model=model_name,
             variant_store=vs,
+            pipeline_preset=resolved_pipeline_preset,
+            pipeline_steps=resolved_pipeline_steps,
         )
     except KeyboardInterrupt:
         pass
@@ -946,9 +976,14 @@ def transcribe_watch(
 )
 @click.option(
     "--preprocess",
-    type=click.Choice(["none", "ffmpeg", "ffmpeg_vad", "sox", "maxine"]),
+    type=click.Choice(["none", "ffmpeg", "ffmpeg_vad", "sox", "maxine", "pipeline"]),
     default=None,
     help="Audio preprocessing mode (default: from config, fallback none)",
+)
+@click.option(
+    "--pipeline-preset",
+    default=None,
+    help="Named pipeline preset (when --preprocess=pipeline)",
 )
 @click.option(
     "--segment-by-pauses", is_flag=True, help="Segment by silence and timestamp each segment"
@@ -981,6 +1016,7 @@ def transcribe_all(
     language: str,
     force: bool,
     preprocess: Optional[str],
+    pipeline_preset: Optional[str],
     segment_by_pauses: bool,
     output_format: str,
     diarization: bool,
@@ -1017,6 +1053,11 @@ def transcribe_all(
     stitch_min_text_overlap_chars = trans.stitch_min_text_overlap_chars if trans else 12
     preprocess_output_dir = Path(trans.preprocess_output_dir) if trans else None
     keep_preprocessed_audio = bool(trans.keep_preprocessed_audio) if trans else False
+    resolved_pipeline_preset = (
+        pipeline_preset
+        or (trans.pipeline_preset if trans else None)
+    )
+    resolved_pipeline_steps = trans.pipeline_steps if trans else None
 
     # Find files to transcribe
     with console.status("[bold blue]Scanning for files..."):
@@ -1096,6 +1137,8 @@ def transcribe_all(
                     segment_by_pauses=segment_by_pauses,
                     diarization_enabled=diarization_enabled,
                     diarization_mode=diarization_mode,
+                    pipeline_preset=resolved_pipeline_preset,
+                    pipeline_steps=resolved_pipeline_steps,
                 )
 
                 if result.success:
@@ -2103,6 +2146,428 @@ def variants_backfill(
         count = vs.backfill(scan_dir, asr_model=model, preprocess=preprocess)
 
     console.print(f"[green]Backfill complete: {count} new variants registered[/green]")
+
+
+# ---------------------------------------------------------------------------
+# Training command group
+# ---------------------------------------------------------------------------
+
+
+def _get_training_config(cfg: Config):
+    """Get or create default TrainingConfig."""
+    from .config import TrainingConfig
+    return cfg.training or TrainingConfig()
+
+
+@cli.group()
+def training() -> None:
+    """LoRA fine-tuning: chunk, label, normalize, train, and benchmark."""
+    pass
+
+
+@training.command("chunk")
+@click.argument("input_dir", type=click.Path(exists=True, path_type=Path))
+@click.option("--output-dir", "-o", type=click.Path(path_type=Path), help="Output directory for chunks")
+@click.option("--min-duration", type=float, default=2.0, help="Minimum chunk duration (seconds)")
+@click.option("--max-duration", type=float, default=15.0, help="Maximum chunk duration (seconds)")
+@click.option("--pad", type=float, default=0.5, help="Ambient padding (seconds)")
+@click.option("--energy-threshold", type=float, default=500.0, help="VAD energy threshold")
+@click.option("--preprocess", type=str, default=None, help="Pipeline preset for preprocessing before chunking")
+@click.option("--pattern", type=str, default="*.mp3", help="File glob pattern")
+@click.pass_context
+def training_chunk(
+    ctx: click.Context,
+    input_dir: Path,
+    output_dir: Optional[Path],
+    min_duration: float,
+    max_duration: float,
+    pad: float,
+    energy_threshold: float,
+    preprocess: Optional[str],
+    pattern: str,
+) -> None:
+    """Chunk audio recordings into training segments via VAD.
+
+    INPUT_DIR is the directory containing audio files to chunk.
+    """
+    from .chunker import ChunkStore, chunk_audio_file
+    from .pipeline import PipelineDefinition, PipelinePresetStore
+
+    cfg = ctx.obj["config"]
+    tcfg = _get_training_config(cfg)
+    out = output_dir or Path(tcfg.chunks_dir)
+    db_path = Path(tcfg.chunks_db_path)
+
+    chunk_store = ChunkStore(db_path)
+
+    preprocess_pipeline = None
+    if preprocess:
+        preset_store = PipelinePresetStore(db_path=cfg.output_dir / "pipeline_presets.db")
+        preprocess_pipeline = preset_store.load(preprocess)
+        if preprocess_pipeline is None:
+            console.print(f"[red]Pipeline preset not found: {preprocess}[/red]")
+            sys.exit(1)
+
+    audio_files = sorted(input_dir.rglob(pattern))
+    if not audio_files:
+        console.print(f"[yellow]No files matching '{pattern}' in {input_dir}[/yellow]")
+        return
+
+    console.print(f"[bold]Chunking {len(audio_files)} audio files[/bold]")
+    console.print(f"  Output: {out}")
+    console.print(f"  Duration range: {min_duration}-{max_duration}s")
+    console.print(f"  Padding: {pad}s")
+    console.print()
+
+    total_chunks = 0
+    with Progress(
+        SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+        BarColumn(), TaskProgressColumn(), console=console,
+    ) as progress:
+        task = progress.add_task("Chunking...", total=len(audio_files))
+        for audio_file in audio_files:
+            chunks = chunk_audio_file(
+                audio_file,
+                out,
+                chunk_store,
+                preprocess_pipeline=preprocess_pipeline,
+                min_duration=min_duration,
+                max_duration=max_duration,
+                pad_seconds=pad,
+                energy_threshold=energy_threshold,
+            )
+            total_chunks += len(chunks)
+            progress.update(task, advance=1, description=f"{audio_file.name}: {len(chunks)} chunks")
+
+    console.print(f"\n[green]Done: {total_chunks} chunks from {len(audio_files)} files[/green]")
+
+
+@training.command("label")
+@click.option("--chunks-dir", type=click.Path(exists=True, path_type=Path), help="Directory with WAV chunks")
+@click.option("--whisper-host", envvar="WHISPER_GRPC_HOST", default="localhost")
+@click.option("--whisper-port", envvar="WHISPER_GRPC_PORT", type=int, default=50051)
+@click.option("--parakeet-host", envvar="PARAKEET_GRPC_HOST", default="localhost")
+@click.option("--parakeet-port", envvar="PARAKEET_GRPC_PORT", type=int, default=50052)
+@click.option("--max-files", type=int, default=0, help="Limit number of files to label (0=all)")
+@click.pass_context
+def training_label(
+    ctx: click.Context,
+    chunks_dir: Optional[Path],
+    whisper_host: str,
+    whisper_port: int,
+    parakeet_host: str,
+    parakeet_port: int,
+    max_files: int,
+) -> None:
+    """Run dual-ASR (Whisper + Parakeet) on chunks and compute CER.
+
+    Populates the label store with consensus pseudo-labels.
+    """
+    if not TRANSCRIPTION_AVAILABLE:
+        console.print("[red]Transcription dependencies not installed[/red]")
+        sys.exit(1)
+
+    from .chunker import ChunkStore, _parse_feed_and_date
+    from .evaluation import character_error_rate
+    from .labeling import LabelStore
+
+    cfg = ctx.obj["config"]
+    tcfg = _get_training_config(cfg)
+    cdir = chunks_dir or Path(tcfg.chunks_dir)
+    label_store = LabelStore(Path(tcfg.labels_db_path))
+
+    whisper_client = WhisperClient(grpc_host=whisper_host, grpc_port=whisper_port)
+    parakeet_client = WhisperClient(grpc_host=parakeet_host, grpc_port=parakeet_port)
+
+    wav_files = sorted(cdir.rglob("*.wav"))
+    if max_files > 0:
+        wav_files = wav_files[:max_files]
+
+    if not wav_files:
+        console.print("[yellow]No WAV chunks found[/yellow]")
+        return
+
+    console.print(f"[bold]Labeling {len(wav_files)} chunks with dual-ASR[/bold]")
+    console.print(f"  Whisper: {whisper_host}:{whisper_port}")
+    console.print(f"  Parakeet: {parakeet_host}:{parakeet_port}")
+    console.print()
+
+    import wave
+    from .chunker import _chunk_id
+
+    labeled = 0
+    errors = 0
+    with Progress(
+        SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+        BarColumn(), TaskProgressColumn(), console=console,
+    ) as progress:
+        task = progress.add_task("Labeling...", total=len(wav_files))
+        for wav_path in wav_files:
+            try:
+                with wave.open(str(wav_path), "rb") as wf:
+                    duration = wf.getnframes() / wf.getframerate()
+
+                w_result = whisper_client.transcribe(wav_path)
+                w_text = w_result.get("text", "") if isinstance(w_result, dict) else str(w_result)
+
+                p_result = parakeet_client.transcribe(wav_path)
+                p_text = p_result.get("text", "") if isinstance(p_result, dict) else str(p_result)
+
+                cer = character_error_rate(w_text, p_text)
+
+                feed_id, date = _parse_feed_and_date(wav_path.name)
+                cid = _chunk_id(wav_path.stem, 0)
+
+                label_store.save_label(
+                    chunk_id=cid,
+                    audio_path=str(wav_path),
+                    feed_id=feed_id,
+                    date=date,
+                    duration=duration,
+                    whisper_text=w_text,
+                    parakeet_text=p_text,
+                    cer=cer,
+                )
+                labeled += 1
+            except Exception as exc:
+                logger.error("Failed to label %s: %s", wav_path.name, exc)
+                errors += 1
+
+            progress.update(task, advance=1)
+
+    console.print(f"\n[green]Labeled: {labeled}, Errors: {errors}[/green]")
+
+
+@training.command("filter")
+@click.option("--max-cer", type=float, default=0.05, help="CER threshold for acceptance")
+@click.pass_context
+def training_filter(ctx: click.Context, max_cer: float) -> None:
+    """Apply CER threshold to accept/reject pending labels."""
+    from .labeling import LabelStore
+
+    cfg = ctx.obj["config"]
+    tcfg = _get_training_config(cfg)
+    label_store = LabelStore(Path(tcfg.labels_db_path))
+
+    accepted, rejected = label_store.filter_by_cer(max_cer)
+    console.print(f"[green]Accepted: {accepted}[/green]  [red]Rejected: {rejected}[/red]  (CER threshold: {max_cer})")
+
+
+@training.command("stats")
+@click.pass_context
+def training_stats(ctx: click.Context) -> None:
+    """Show labeling progress summary."""
+    from .labeling import LabelStore
+
+    cfg = ctx.obj["config"]
+    tcfg = _get_training_config(cfg)
+    label_store = LabelStore(Path(tcfg.labels_db_path))
+
+    summary = label_store.summary()
+    table = Table(title="Labeling Progress")
+    table.add_column("Metric", style="bold")
+    table.add_column("Count", justify="right")
+    table.add_row("Total chunks", str(summary["total"]))
+    table.add_row("Pending", str(summary["pending"]))
+    table.add_row("Accepted", f"[green]{summary['accepted']}[/green]")
+    table.add_row("Rejected", f"[red]{summary['rejected']}[/red]")
+    table.add_row("Verified", f"[cyan]{summary['verified']}[/cyan]")
+    table.add_row("Average CER", f"{summary['avg_cer']:.4f}")
+    console.print(table)
+
+
+@training.command("normalize")
+@click.option("--preview", is_flag=True, help="Preview normalization without saving")
+@click.option("--limit", type=int, default=10, help="Number of samples to preview")
+@click.pass_context
+def training_normalize(ctx: click.Context, preview: bool, limit: int) -> None:
+    """Apply spoken-form text normalization to verified labels."""
+    from .labeling import LabelStore
+    from .text_norm import TextNormalizer
+
+    cfg = ctx.obj["config"]
+    tcfg = _get_training_config(cfg)
+    label_store = LabelStore(Path(tcfg.labels_db_path))
+
+    waypoints = tcfg.lexicon.waypoints if tcfg.lexicon else {}
+    normalizer = TextNormalizer(waypoint_map=waypoints)
+
+    chunks = label_store.get_verified_chunks(limit=10000)
+    if not chunks:
+        console.print("[yellow]No verified/accepted chunks to normalize[/yellow]")
+        return
+
+    if preview:
+        console.print(f"[bold]Preview: {min(limit, len(chunks))} samples[/bold]\n")
+        for chunk in chunks[:limit]:
+            source = chunk.verified_text or chunk.consensus_text
+            spoken = normalizer.to_spoken(source)
+            console.print(f"[dim]{chunk.chunk_id[:10]}[/dim]")
+            console.print(f"  [bold]Original:[/bold] {source}")
+            console.print(f"  [bold]Spoken:  [/bold] {spoken}")
+            console.print()
+        return
+
+    count = 0
+    for chunk in chunks:
+        source = chunk.verified_text or chunk.consensus_text
+        if not source:
+            continue
+        spoken = normalizer.to_spoken(source)
+        label_store.update_spoken_text(chunk.chunk_id, spoken)
+        count += 1
+
+    console.print(f"[green]Normalized {count} chunks[/green]")
+
+
+@training.command("manifest")
+@click.option("--output-dir", "-o", type=click.Path(path_type=Path), help="Output directory for manifests")
+@click.option("--train-ratio", type=float, default=0.9, help="Train/val split ratio")
+@click.pass_context
+def training_manifest(ctx: click.Context, output_dir: Optional[Path], train_ratio: float) -> None:
+    """Generate NeMo training manifests from labeled data."""
+    from .labeling import LabelStore
+    from .training import export_manifests
+
+    cfg = ctx.obj["config"]
+    tcfg = _get_training_config(cfg)
+    label_store = LabelStore(Path(tcfg.labels_db_path))
+
+    out = output_dir or Path(tcfg.output_dir) / "manifests"
+    chunks = label_store.get_verified_chunks()
+
+    if not chunks:
+        console.print("[yellow]No verified/accepted chunks for manifest export[/yellow]")
+        return
+
+    train_path, val_path, stats = export_manifests(
+        chunks, out, train_ratio=train_ratio,
+        min_duration=tcfg.min_chunk_duration,
+        max_duration=tcfg.max_chunk_duration,
+    )
+
+    table = Table(title="Manifest Export")
+    table.add_column("Metric", style="bold")
+    table.add_column("Value", justify="right")
+    table.add_row("Total entries", str(stats["total"]))
+    table.add_row("Training", str(stats["train"]))
+    table.add_row("Validation", str(stats["val"]))
+    table.add_row("Total hours", f"{stats['total_duration_hours']:.2f}")
+    table.add_row("Train manifest", str(train_path))
+    table.add_row("Val manifest", str(val_path))
+    console.print(table)
+
+
+@training.command("configure")
+@click.option("--output", "-o", type=click.Path(path_type=Path), default=None, help="Output YAML path")
+@click.option("--train-manifest", type=str, default=None, help="Path to training manifest")
+@click.option("--val-manifest", type=str, default=None, help="Path to validation manifest")
+@click.pass_context
+def training_configure(
+    ctx: click.Context,
+    output: Optional[Path],
+    train_manifest: Optional[str],
+    val_manifest: Optional[str],
+) -> None:
+    """Generate NeMo LoRA training YAML config."""
+    from .training import generate_nemo_config, save_nemo_config
+
+    cfg = ctx.obj["config"]
+    tcfg = _get_training_config(cfg)
+
+    out_dir = Path(tcfg.output_dir)
+    t_manifest = train_manifest or str(out_dir / "manifests" / "train_kdca.json")
+    v_manifest = val_manifest or str(out_dir / "manifests" / "val_kdca.json")
+    out_path = output or (out_dir / "parakeet_lora.yaml")
+
+    nemo_config = generate_nemo_config(
+        train_manifest=t_manifest,
+        val_manifest=v_manifest,
+        base_model=tcfg.base_model,
+        output_dir=str(out_dir),
+        lora_r=tcfg.lora.r,
+        lora_alpha=tcfg.lora.alpha,
+        lora_dropout=tcfg.lora.dropout,
+        target_modules=tcfg.lora.target_modules,
+        batch_size=tcfg.batch_size,
+        max_epochs=tcfg.max_epochs,
+        learning_rate=tcfg.learning_rate,
+    )
+
+    save_nemo_config(nemo_config, out_path)
+    console.print(f"[green]Saved NeMo training config to {out_path}[/green]")
+
+
+@training.command("start")
+@click.pass_context
+def training_start(ctx: click.Context) -> None:
+    """Print the docker compose command to launch LoRA training."""
+    console.print("[bold]To start LoRA training, run:[/bold]")
+    console.print()
+    console.print("  docker compose --profile train up nemo-training")
+    console.print()
+    console.print("[dim]Ensure manifests are generated first with: atc-recorder training manifest[/dim]")
+
+
+@training.command("benchmark")
+@click.option("--test-manifest", "-t", type=click.Path(exists=True, path_type=Path), required=True)
+@click.option("--model", "-m", type=str, default="whisper", help="Model name: whisper, parakeet, parakeet-lora")
+@click.option("--host", "-H", envvar="WHISPER_GRPC_HOST", default="localhost")
+@click.option("--port", "-p", type=int, default=50051)
+@click.pass_context
+def training_benchmark(
+    ctx: click.Context,
+    test_manifest: Path,
+    model: str,
+    host: str,
+    port: int,
+) -> None:
+    """Run WER/CER benchmark against a test manifest."""
+    if not TRANSCRIPTION_AVAILABLE:
+        console.print("[red]Transcription dependencies not installed[/red]")
+        sys.exit(1)
+
+    from .evaluation import BenchmarkStore, run_benchmark
+
+    cfg = ctx.obj["config"]
+    tcfg = _get_training_config(cfg)
+
+    client = WhisperClient(grpc_host=host, grpc_port=port)
+
+    def transcribe_fn(audio_path: Path) -> str:
+        result = client.transcribe(audio_path)
+        if isinstance(result, dict):
+            return result.get("text", "")
+        return str(result)
+
+    console.print(f"[bold]Running benchmark: {model}[/bold]")
+    console.print(f"  Manifest: {test_manifest}")
+    console.print(f"  Service: {host}:{port}")
+    console.print()
+
+    def _progress(idx, total, fr):
+        console.print(f"  [{idx+1}/{total}] WER={fr.wer:.3f} CER={fr.cer:.3f} {Path(fr.audio_filepath).name}")
+
+    report = run_benchmark(
+        test_manifest, transcribe_fn, model_name=model, progress_callback=_progress,
+    )
+
+    bench_store = BenchmarkStore(Path(tcfg.benchmark_db_path))
+    run_id = bench_store.save_report(report)
+
+    console.print()
+    table = Table(title=f"Benchmark Results (run #{run_id})")
+    table.add_column("Metric", style="bold")
+    table.add_column("Value", justify="right")
+    table.add_row("Model", report.model)
+    table.add_row("Files", str(report.total_files))
+    table.add_row("Aggregate WER", f"[bold]{report.aggregate_wer:.4f}[/bold]")
+    table.add_row("Aggregate CER", f"{report.aggregate_cer:.4f}")
+    table.add_row("Total audio", f"{report.total_duration_sec:.1f}s")
+    table.add_row("Total inference", f"{report.total_inference_sec:.1f}s")
+    rtf = report.total_inference_sec / report.total_duration_sec if report.total_duration_sec > 0 else 0
+    table.add_row("RTF", f"{rtf:.3f}")
+    console.print(table)
 
 
 if __name__ == "__main__":
