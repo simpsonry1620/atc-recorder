@@ -1699,6 +1699,181 @@ def create_app(config: Config) -> FastAPI:
             tcfg = TrainingConfig()
         return ChunkStore(Path(tcfg.chunks_db_path))
 
+    def _get_training_cfg():
+        from .config import TrainingConfig
+        return config.training or TrainingConfig()
+
+    @app.post("/api/labeling/start-chunking")
+    async def labeling_start_chunking(request: Request):
+        from .chunker import ChunkStore, chunk_audio_file
+        from .pipeline import PipelinePresetStore
+
+        body = await request.json()
+        feed_id = body.get("feed_id", "")
+        pattern = body.get("pattern", "*.mp3")
+        preprocess_name = body.get("preprocess", "")
+
+        tcfg = _get_training_cfg()
+        chunk_store = ChunkStore(Path(tcfg.chunks_db_path))
+        out_dir = Path(tcfg.chunks_dir)
+
+        scan_dir = recordings
+        if feed_id:
+            feed_dir = recordings / feed_id
+            if feed_dir.is_dir():
+                scan_dir = feed_dir
+
+        audio_files = sorted(scan_dir.rglob(pattern))
+        if not audio_files:
+            return {"batch_id": None, "total": 0, "status": "no_files"}
+
+        preprocess_pipeline = None
+        if preprocess_name:
+            ps = PipelinePresetStore(db_path=recordings / "pipeline_presets.db")
+            preprocess_pipeline = ps.load(preprocess_name)
+
+        batch_id = uuid.uuid4().hex[:12]
+        _batch_jobs[batch_id] = {
+            "status": "running",
+            "total": len(audio_files),
+            "completed": 0,
+            "failed": 0,
+            "current_file": None,
+            "current_index": 0,
+            "errors": [],
+            "cancelled": False,
+            "chunks_created": 0,
+        }
+
+        def _run_chunking():
+            job = _batch_jobs[batch_id]
+            for i, audio_path in enumerate(audio_files):
+                if job["cancelled"]:
+                    job["status"] = "cancelled"
+                    return
+                job["current_file"] = audio_path.name
+                job["current_index"] = i
+                try:
+                    chunks = chunk_audio_file(
+                        audio_path, out_dir, chunk_store,
+                        preprocess_pipeline=preprocess_pipeline,
+                        min_duration=tcfg.min_chunk_duration,
+                        max_duration=tcfg.max_chunk_duration,
+                        pad_seconds=tcfg.pad_seconds,
+                        energy_threshold=tcfg.energy_threshold,
+                    )
+                    job["completed"] += 1
+                    job["chunks_created"] = job.get("chunks_created", 0) + len(chunks)
+                except Exception as exc:
+                    job["failed"] += 1
+                    job["errors"].append({"file": audio_path.name, "error": str(exc)})
+                    logger.warning("Chunking failed %s: %s", audio_path.name, exc)
+            job["status"] = "completed"
+            job["current_file"] = None
+
+        thread = threading.Thread(target=_run_chunking, daemon=True)
+        thread.start()
+        return {"batch_id": batch_id, "total": len(audio_files), "status": "running"}
+
+    @app.post("/api/labeling/start-labeling")
+    async def labeling_start_labeling(request: Request):
+        body = await request.json()
+        whisper_host = body.get("whisper_host", os.environ.get("WHISPER_GRPC_HOST", "whisper-asr"))
+        whisper_port = int(body.get("whisper_port", os.environ.get("WHISPER_GRPC_PORT", "50051")))
+        parakeet_host = body.get("parakeet_host", os.environ.get("PARAKEET_GRPC_HOST", "parakeet-asr"))
+        parakeet_port = int(body.get("parakeet_port", os.environ.get("PARAKEET_GRPC_PORT", "50051")))
+        max_cer = float(body.get("max_cer", 0.05))
+        auto_filter = bool(body.get("auto_filter", True))
+
+        try:
+            from .transcribe import WhisperClient, RIVA_AVAILABLE
+        except ImportError:
+            raise HTTPException(503, "Transcription dependencies not available")
+        if not RIVA_AVAILABLE:
+            raise HTTPException(503, "ASR client dependency missing (nvidia-riva-client)")
+
+        tcfg = _get_training_cfg()
+        chunks_dir = Path(tcfg.chunks_dir)
+        label_store = _get_label_store()
+
+        existing = {c.chunk_id for c in label_store.list_chunks(limit=100000)}
+        wav_files = sorted(chunks_dir.rglob("*.wav"))
+        unlabeled = [f for f in wav_files if not any(f.stem in eid for eid in existing)]
+        if not unlabeled:
+            unlabeled = wav_files
+
+        if not unlabeled:
+            return {"batch_id": None, "total": 0, "status": "no_files"}
+
+        batch_id = uuid.uuid4().hex[:12]
+        _batch_jobs[batch_id] = {
+            "status": "running",
+            "total": len(unlabeled),
+            "completed": 0,
+            "failed": 0,
+            "current_file": None,
+            "current_index": 0,
+            "errors": [],
+            "cancelled": False,
+            "labeled": 0,
+            "accepted": 0,
+            "rejected": 0,
+        }
+
+        def _run_labeling():
+            import wave as _wave
+            from .chunker import _chunk_id, _parse_feed_and_date
+            from .evaluation import character_error_rate
+
+            job = _batch_jobs[batch_id]
+            w_client = WhisperClient(grpc_host=whisper_host, grpc_port=whisper_port)
+            p_client = WhisperClient(grpc_host=parakeet_host, grpc_port=parakeet_port)
+            ls = _get_label_store()
+
+            for i, wav_path in enumerate(unlabeled):
+                if job["cancelled"]:
+                    job["status"] = "cancelled"
+                    return
+                job["current_file"] = wav_path.name
+                job["current_index"] = i
+                try:
+                    with _wave.open(str(wav_path), "rb") as wf:
+                        duration = wf.getnframes() / wf.getframerate()
+
+                    w_result = w_client.transcribe(wav_path)
+                    w_text = w_result.get("text", "") if isinstance(w_result, dict) else str(w_result)
+
+                    p_result = p_client.transcribe(wav_path)
+                    p_text = p_result.get("text", "") if isinstance(p_result, dict) else str(p_result)
+
+                    cer = character_error_rate(w_text, p_text)
+                    feed_id, date = _parse_feed_and_date(wav_path.name)
+                    cid = _chunk_id(wav_path.stem, 0)
+
+                    ls.save_label(
+                        chunk_id=cid, audio_path=str(wav_path),
+                        feed_id=feed_id, date=date, duration=duration,
+                        whisper_text=w_text, parakeet_text=p_text, cer=cer,
+                    )
+                    job["completed"] += 1
+                    job["labeled"] = job.get("labeled", 0) + 1
+                except Exception as exc:
+                    job["failed"] += 1
+                    job["errors"].append({"file": wav_path.name, "error": str(exc)})
+                    logger.warning("Labeling failed %s: %s", wav_path.name, exc)
+
+            if auto_filter:
+                accepted, rejected = ls.filter_by_cer(max_cer)
+                job["accepted"] = accepted
+                job["rejected"] = rejected
+
+            job["status"] = "completed"
+            job["current_file"] = None
+
+        thread = threading.Thread(target=_run_labeling, daemon=True)
+        thread.start()
+        return {"batch_id": batch_id, "total": len(unlabeled), "status": "running"}
+
     @app.get("/api/labeling/summary")
     async def labeling_summary():
         return _get_label_store().summary()

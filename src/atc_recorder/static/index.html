@@ -387,78 +387,169 @@
 
       <!-- ═══════════ LABELING ═══════════ -->
       <section id="panel-labeling" class="tab-panel hidden p-6">
-        <div id="lb-summary" class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6"></div>
 
-        <div class="flex flex-wrap gap-3 items-end mb-4">
-          <div>
-            <label class="label">Status</label>
-            <select id="lb-status-filter" class="input w-40">
-              <option value="">All</option>
-              <option value="pending">Pending</option>
-              <option value="accepted">Accepted</option>
-              <option value="rejected">Rejected</option>
-              <option value="verified">Verified</option>
-            </select>
-          </div>
-          <div>
-            <label class="label">Max CER</label>
-            <input id="lb-cer-max" type="number" class="input w-24" step="0.01" placeholder="0.05" />
-          </div>
-          <div>
-            <label class="label">Feed</label>
-            <input id="lb-feed-filter" type="text" class="input w-36" placeholder="all" />
-          </div>
-          <button id="lb-search" class="btn-primary h-10">Filter</button>
-          <div class="ml-auto flex gap-2">
-            <button id="lb-accept-all" class="btn-primary h-10 text-xs">Accept CER &lt; 5%</button>
-            <button id="lb-reject-high" class="btn-secondary h-10 text-xs text-red-400">Reject CER &gt; 10%</button>
-            <button id="lb-normalize" class="btn-primary h-10 text-xs">Normalize Text</button>
-            <button id="lb-export" class="btn-primary h-10 text-xs">Export Manifest</button>
+        <!-- Empty-state guide (shown when no chunks exist) -->
+        <div id="lb-empty-guide" class="hidden">
+          <div class="max-w-4xl mx-auto py-8">
+            <div class="text-center mb-8">
+              <svg class="w-14 h-14 mx-auto text-gray-700 mb-3" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M19.114 5.636a9 9 0 0 1 0 12.728M16.463 8.288a5.25 5.25 0 0 1 0 7.424M6.75 8.25l4.72-4.72a.75.75 0 0 1 1.28.53v15.88a.75.75 0 0 1-1.28.53l-4.72-4.72H4.51c-.88 0-1.704-.507-1.938-1.354A9.009 9.009 0 0 1 2.25 12c0-.83.112-1.633.322-2.396C2.806 8.756 3.63 8.25 4.51 8.25H6.75Z" />
+              </svg>
+              <h2 class="text-xl font-semibold text-gray-200 mb-2">Labeling Pipeline</h2>
+              <p class="text-gray-400 text-sm max-w-lg mx-auto">Chunk your recordings, label them with dual-ASR, then review and verify the results below.</p>
+            </div>
+
+            <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
+
+              <!-- Step 1: Chunk -->
+              <div id="lb-step1" class="rounded-xl border border-gray-800 bg-gray-900/50 p-5 flex flex-col">
+                <div class="flex items-center gap-2 mb-3">
+                  <span class="flex items-center justify-center w-7 h-7 rounded-full bg-brand-900/50 text-brand-400 text-sm font-bold shrink-0">1</span>
+                  <h3 class="text-sm font-semibold text-gray-200">Chunk Recordings</h3>
+                </div>
+                <p class="text-xs text-gray-500 mb-4">Split recordings into 2-15 second single-transmission WAV segments using voice activity detection.</p>
+                <div class="mb-3">
+                  <label class="text-xs text-gray-400 mb-1 block">Feed (optional)</label>
+                  <select id="lb-chunk-feed" class="input w-full text-xs h-8">
+                    <option value="">All feeds</option>
+                  </select>
+                </div>
+                <div class="mt-auto space-y-2">
+                  <button id="lb-start-chunk" class="btn-primary w-full h-9 text-sm">Start Chunking</button>
+                  <div id="lb-chunk-progress" class="hidden">
+                    <div class="wf-progress-track"><div id="lb-chunk-bar" class="wf-progress-bar" style="width:0%"></div></div>
+                    <div id="lb-chunk-status" class="text-xs text-gray-500 mt-1">Starting...</div>
+                  </div>
+                  <div id="lb-chunk-done" class="hidden text-xs text-green-400"></div>
+                </div>
+              </div>
+
+              <!-- Step 2: Label -->
+              <div id="lb-step2" class="rounded-xl border border-gray-800 bg-gray-900/50 p-5 flex flex-col">
+                <div class="flex items-center gap-2 mb-3">
+                  <span class="flex items-center justify-center w-7 h-7 rounded-full bg-brand-900/50 text-brand-400 text-sm font-bold shrink-0">2</span>
+                  <h3 class="text-sm font-semibold text-gray-200">Label with Dual-ASR</h3>
+                </div>
+                <p class="text-xs text-gray-500 mb-4">Run Whisper and Parakeet on each chunk, then auto-filter by Character Error Rate agreement.</p>
+                <div class="mb-2">
+                  <label class="text-xs text-gray-400 mb-1 block">CER threshold</label>
+                  <input id="lb-label-cer" type="number" class="input w-full text-xs h-8" value="0.05" step="0.01" min="0" max="1" />
+                </div>
+                <label class="flex items-center gap-2 text-xs text-gray-400 mb-3 cursor-pointer">
+                  <input type="checkbox" id="lb-auto-filter" checked class="accent-brand-500" />
+                  Auto-filter after labeling
+                </label>
+                <div class="mt-auto space-y-2">
+                  <button id="lb-start-label" class="btn-primary w-full h-9 text-sm" disabled>Start Labeling</button>
+                  <div id="lb-label-progress" class="hidden">
+                    <div class="wf-progress-track"><div id="lb-label-bar" class="wf-progress-bar" style="width:0%"></div></div>
+                    <div id="lb-label-status" class="text-xs text-gray-500 mt-1">Starting...</div>
+                  </div>
+                  <div id="lb-label-done" class="hidden text-xs text-green-400"></div>
+                </div>
+              </div>
+
+              <!-- Step 3: Review -->
+              <div id="lb-step3" class="rounded-xl border border-gray-800 bg-gray-900/50 p-5 flex flex-col">
+                <div class="flex items-center gap-2 mb-3">
+                  <span class="flex items-center justify-center w-7 h-7 rounded-full bg-brand-900/50 text-brand-400 text-sm font-bold shrink-0">3</span>
+                  <h3 class="text-sm font-semibold text-gray-200">Review Labels</h3>
+                </div>
+                <p class="text-xs text-gray-500 mb-4">Listen to each segment, compare ASR outputs, and verify or correct the transcriptions.</p>
+                <div class="flex flex-wrap gap-x-3 gap-y-1 mb-4 text-xs">
+                  <span><kbd class="px-1.5 py-0.5 bg-gray-800 rounded text-gray-400 border border-gray-700">Space</kbd> play</span>
+                  <span><kbd class="px-1.5 py-0.5 bg-gray-800 rounded text-gray-400 border border-gray-700">A</kbd> accept</span>
+                  <span><kbd class="px-1.5 py-0.5 bg-gray-800 rounded text-gray-400 border border-gray-700">R</kbd> reject</span>
+                  <span><kbd class="px-1.5 py-0.5 bg-gray-800 rounded text-gray-400 border border-gray-700">V</kbd> verify</span>
+                </div>
+                <div class="mt-auto">
+                  <button id="lb-start-review" class="btn-primary w-full h-9 text-sm" disabled>Start Reviewing</button>
+                </div>
+              </div>
+
+            </div>
+
+            <div class="mt-6 text-center">
+              <p class="text-xs text-gray-600">After reviewing, use the toolbar buttons to normalize text and export NeMo training manifests. See the <button class="text-brand-400 hover:underline lb-go-training">Training tab</button> for the full LoRA pipeline.</p>
+            </div>
           </div>
         </div>
 
-        <div id="lb-table-wrap" class="overflow-x-auto">
-          <table class="w-full text-sm text-left">
-            <thead class="text-xs uppercase text-gray-400 border-b border-gray-800">
-              <tr>
-                <th class="px-3 py-2">Chunk</th>
-                <th class="px-3 py-2">Feed</th>
-                <th class="px-3 py-2">Dur</th>
-                <th class="px-3 py-2">CER</th>
-                <th class="px-3 py-2">Status</th>
-                <th class="px-3 py-2">Whisper</th>
-                <th class="px-3 py-2">Parakeet</th>
-                <th class="px-3 py-2">Actions</th>
-              </tr>
-            </thead>
-            <tbody id="lb-tbody" class="divide-y divide-gray-800/50"></tbody>
-          </table>
-        </div>
+        <!-- Active labeling UI (shown when chunks exist) -->
+        <div id="lb-active-ui" class="hidden">
+          <div id="lb-summary" class="grid grid-cols-2 md:grid-cols-5 gap-4 mb-6"></div>
 
-        <div id="lb-review" class="hidden mt-6 card">
-          <h3 class="card-title mb-3">Review Chunk</h3>
-          <div class="mb-3">
-            <audio id="lb-audio" controls class="w-full rounded-lg"></audio>
-          </div>
-          <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-3">
+          <div class="flex flex-wrap gap-3 items-end mb-4">
             <div>
-              <label class="label">Whisper</label>
-              <div id="lb-whisper-text" class="text-sm bg-gray-800 rounded px-3 py-2 min-h-[60px]"></div>
+              <label class="label">Status</label>
+              <select id="lb-status-filter" class="input w-40">
+                <option value="">All</option>
+                <option value="pending">Pending</option>
+                <option value="accepted">Accepted</option>
+                <option value="rejected">Rejected</option>
+                <option value="verified">Verified</option>
+              </select>
             </div>
             <div>
-              <label class="label">Parakeet</label>
-              <div id="lb-parakeet-text" class="text-sm bg-gray-800 rounded px-3 py-2 min-h-[60px]"></div>
+              <label class="label">Max CER</label>
+              <input id="lb-cer-max" type="number" class="input w-24" step="0.01" placeholder="0.05" />
+            </div>
+            <div>
+              <label class="label">Feed</label>
+              <input id="lb-feed-filter" type="text" class="input w-36" placeholder="all" />
+            </div>
+            <button id="lb-search" class="btn-primary h-10">Filter</button>
+            <div class="ml-auto flex gap-2">
+              <button id="lb-accept-all" class="btn-primary h-10 text-xs">Accept CER &lt; 5%</button>
+              <button id="lb-reject-high" class="btn-secondary h-10 text-xs text-red-400">Reject CER &gt; 10%</button>
+              <button id="lb-normalize" class="btn-primary h-10 text-xs">Normalize Text</button>
+              <button id="lb-export" class="btn-primary h-10 text-xs">Export Manifest</button>
             </div>
           </div>
-          <div class="mb-3">
-            <label class="label">Verified Text (editable)</label>
-            <textarea id="lb-verified-text" rows="3" class="input w-full"></textarea>
+
+          <div id="lb-table-wrap" class="overflow-x-auto">
+            <table class="w-full text-sm text-left">
+              <thead class="text-xs uppercase text-gray-400 border-b border-gray-800">
+                <tr>
+                  <th class="px-3 py-2">Chunk</th>
+                  <th class="px-3 py-2">Feed</th>
+                  <th class="px-3 py-2">Dur</th>
+                  <th class="px-3 py-2">CER</th>
+                  <th class="px-3 py-2">Status</th>
+                  <th class="px-3 py-2">Whisper</th>
+                  <th class="px-3 py-2">Parakeet</th>
+                  <th class="px-3 py-2">Actions</th>
+                </tr>
+              </thead>
+              <tbody id="lb-tbody" class="divide-y divide-gray-800/50"></tbody>
+            </table>
           </div>
-          <div class="flex gap-2">
-            <button id="lb-verify-btn" class="btn-primary h-9">Verify</button>
-            <button id="lb-accept-btn" class="btn-primary h-9">Accept</button>
-            <button id="lb-reject-btn" class="btn-secondary h-9 text-red-400">Reject</button>
-            <span id="lb-review-id" class="ml-auto text-xs text-gray-500"></span>
+
+          <div id="lb-review" class="hidden mt-6 card">
+            <h3 class="card-title mb-3">Review Chunk</h3>
+            <div class="mb-3">
+              <audio id="lb-audio" controls class="w-full rounded-lg"></audio>
+            </div>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-3">
+              <div>
+                <label class="label">Whisper</label>
+                <div id="lb-whisper-text" class="text-sm bg-gray-800 rounded px-3 py-2 min-h-[60px]"></div>
+              </div>
+              <div>
+                <label class="label">Parakeet</label>
+                <div id="lb-parakeet-text" class="text-sm bg-gray-800 rounded px-3 py-2 min-h-[60px]"></div>
+              </div>
+            </div>
+            <div class="mb-3">
+              <label class="label">Verified Text (editable)</label>
+              <textarea id="lb-verified-text" rows="3" class="input w-full"></textarea>
+            </div>
+            <div class="flex gap-2">
+              <button id="lb-verify-btn" class="btn-primary h-9">Verify</button>
+              <button id="lb-accept-btn" class="btn-primary h-9">Accept</button>
+              <button id="lb-reject-btn" class="btn-secondary h-9 text-red-400">Reject</button>
+              <span id="lb-review-id" class="ml-auto text-xs text-gray-500"></span>
+            </div>
           </div>
         </div>
       </section>

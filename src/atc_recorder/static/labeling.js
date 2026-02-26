@@ -33,10 +33,103 @@
     return s && s.length > n ? s.slice(0, n) + "..." : s || "";
   }
 
+  // --- empty vs active state toggling ---
+  function showEmptyGuide() {
+    const guide = document.getElementById("lb-empty-guide");
+    const active = document.getElementById("lb-active-ui");
+    if (guide) guide.classList.remove("hidden");
+    if (active) active.classList.add("hidden");
+  }
+
+  function showActiveUI() {
+    const guide = document.getElementById("lb-empty-guide");
+    const active = document.getElementById("lb-active-ui");
+    if (guide) guide.classList.add("hidden");
+    if (active) active.classList.remove("hidden");
+  }
+
+  // --- background job polling ---
+  function pollJob(batchId, barEl, statusEl, onComplete) {
+    const interval = setInterval(async () => {
+      try {
+        const j = await api(`/api/pipeline/batch/${batchId}`);
+        const pct = j.total > 0 ? Math.round((j.completed / j.total) * 100) : 0;
+        if (barEl) barEl.style.width = pct + "%";
+        if (statusEl) {
+          statusEl.textContent = j.current_file
+            ? `${j.completed + j.failed} / ${j.total} — ${j.current_file}`
+            : `${j.completed + j.failed} / ${j.total}`;
+        }
+        if (j.status === "completed" || j.status === "cancelled") {
+          clearInterval(interval);
+          if (barEl) barEl.style.width = "100%";
+          if (onComplete) onComplete(j);
+        }
+      } catch (e) {
+        clearInterval(interval);
+        if (statusEl) statusEl.textContent = "Polling error: " + e.message;
+      }
+    }, 2000);
+    return interval;
+  }
+
+  // --- step state helpers ---
+  function enableStep2() {
+    const btn = document.getElementById("lb-start-label");
+    if (btn) btn.disabled = false;
+  }
+
+  function enableStep3() {
+    const btn = document.getElementById("lb-start-review");
+    if (btn) btn.disabled = false;
+  }
+
+  function populateFeedSelector() {
+    const sel = document.getElementById("lb-chunk-feed");
+    if (!sel) return;
+    fetch("/api/feeds")
+      .then((r) => r.json())
+      .then((feeds) => {
+        sel.innerHTML = '<option value="">All feeds</option>';
+        (feeds || []).forEach((f) => {
+          const name = typeof f === "string" ? f : f.feed_id || f.name || "";
+          if (name) sel.innerHTML += `<option value="${name}">${name}</option>`;
+        });
+      })
+      .catch(() => {});
+  }
+
+  async function checkStepStates() {
+    try {
+      const s = await api("/api/labeling/summary");
+      if (s.total > 0) {
+        enableStep2();
+        enableStep3();
+        return;
+      }
+    } catch (_) {}
+
+    try {
+      const chunks = await fetch("/api/labeling/chunks?limit=1");
+      const data = await chunks.json();
+      if (data && data.length > 0) {
+        enableStep2();
+        enableStep3();
+      }
+    } catch (_) {}
+  }
+
   // --- Labeling tab ---
   async function loadLabelingSummary() {
     try {
       const s = await api("/api/labeling/summary");
+
+      if (s.total === 0) {
+        showEmptyGuide();
+        return;
+      }
+      showActiveUI();
+
       const cards = document.getElementById("lb-summary");
       if (!cards) return;
       cards.innerHTML = [
@@ -266,6 +359,121 @@
         if (audio) audio.paused ? audio.play() : audio.pause();
       }
     });
+
+    // "Training tab" link inside the empty-state guide
+    document.querySelectorAll(".lb-go-training").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        const trainBtn = document.querySelector('[data-tab="training"]');
+        if (trainBtn) trainBtn.click();
+      });
+    });
+
+    // Step 1: Start Chunking
+    document.getElementById("lb-start-chunk")?.addEventListener("click", async () => {
+      const btn = document.getElementById("lb-start-chunk");
+      const prog = document.getElementById("lb-chunk-progress");
+      const bar = document.getElementById("lb-chunk-bar");
+      const status = document.getElementById("lb-chunk-status");
+      const done = document.getElementById("lb-chunk-done");
+      const feed = document.getElementById("lb-chunk-feed")?.value || "";
+
+      btn.disabled = true;
+      btn.textContent = "Chunking...";
+      prog.classList.remove("hidden");
+      done.classList.add("hidden");
+      bar.style.width = "0%";
+
+      try {
+        const r = await api("/api/labeling/start-chunking", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ feed_id: feed }),
+        });
+
+        if (!r.batch_id) {
+          status.textContent = "No audio files found in recordings directory";
+          btn.disabled = false;
+          btn.textContent = "Start Chunking";
+          return;
+        }
+
+        pollJob(r.batch_id, bar, status, (j) => {
+          const chunks = j.chunks_created || 0;
+          done.textContent = `Done: ${chunks} chunks from ${j.completed} files` +
+            (j.failed > 0 ? ` (${j.failed} failed)` : "");
+          done.classList.remove("hidden");
+          prog.classList.add("hidden");
+          btn.textContent = "Re-run Chunking";
+          btn.disabled = false;
+          enableStep2();
+        });
+      } catch (e) {
+        status.textContent = "Error: " + e.message;
+        btn.disabled = false;
+        btn.textContent = "Start Chunking";
+      }
+    });
+
+    // Step 2: Start Labeling
+    document.getElementById("lb-start-label")?.addEventListener("click", async () => {
+      const btn = document.getElementById("lb-start-label");
+      const prog = document.getElementById("lb-label-progress");
+      const bar = document.getElementById("lb-label-bar");
+      const status = document.getElementById("lb-label-status");
+      const done = document.getElementById("lb-label-done");
+      const maxCer = parseFloat(document.getElementById("lb-label-cer")?.value || "0.05");
+      const autoFilter = document.getElementById("lb-auto-filter")?.checked ?? true;
+
+      btn.disabled = true;
+      btn.textContent = "Labeling...";
+      prog.classList.remove("hidden");
+      done.classList.add("hidden");
+      bar.style.width = "0%";
+
+      try {
+        const r = await api("/api/labeling/start-labeling", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ max_cer: maxCer, auto_filter: autoFilter }),
+        });
+
+        if (!r.batch_id) {
+          status.textContent = "No chunks found to label";
+          btn.disabled = false;
+          btn.textContent = "Start Labeling";
+          return;
+        }
+
+        pollJob(r.batch_id, bar, status, (j) => {
+          const parts = [`${j.labeled || j.completed} labeled`];
+          if (j.accepted) parts.push(`${j.accepted} accepted`);
+          if (j.rejected) parts.push(`${j.rejected} rejected`);
+          if (j.failed > 0) parts.push(`${j.failed} failed`);
+          done.textContent = "Done: " + parts.join(", ");
+          done.classList.remove("hidden");
+          prog.classList.add("hidden");
+          btn.textContent = "Re-run Labeling";
+          btn.disabled = false;
+          enableStep3();
+          loadLabelingSummary();
+        });
+      } catch (e) {
+        status.textContent = "Error: " + e.message;
+        btn.disabled = false;
+        btn.textContent = "Start Labeling";
+      }
+    });
+
+    // Step 3: Start Reviewing (switch to active UI)
+    document.getElementById("lb-start-review")?.addEventListener("click", () => {
+      showActiveUI();
+      loadLabelingSummary();
+      loadLabelingChunks();
+    });
+
+    // Populate feed selector and check which steps are ready
+    populateFeedSelector();
+    checkStepStates();
 
     // Tab activation hooks
     const observer = new MutationObserver(() => {
