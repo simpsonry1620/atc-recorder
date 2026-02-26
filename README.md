@@ -577,6 +577,10 @@ docker run -v $(pwd)/recordings:/app/recordings atc-recorder record kdca1_gnd --
 docker run atc-recorder check
 ```
 
+## Documentation
+
+- [Chunking Pipeline](docs/chunking-pipeline.md) — how raw ATC audio is segmented into training-ready chunks via energy-based VAD, and the downstream labeling pipeline for quality-filtered pseudo-labeling.
+
 ## Legal Notice
 
 This tool is for personal and research use only. LiveATC.net's terms of service prohibit use of their streams in third-party products. Please respect their terms and use this tool responsibly.
