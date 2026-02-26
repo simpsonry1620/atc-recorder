@@ -13,84 +13,10 @@ Record and download Air Traffic Control (ATC) audio from LiveATC.net for later t
 
 ## Requirements
 
-- Python 3.10+
-- ffmpeg (for live stream recording)
+- Docker and Docker Compose
+- (Optional) NVIDIA GPU + [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html) for ASR services
 
-### Installing ffmpeg
-
-```bash
-# Ubuntu/Debian
-sudo apt install ffmpeg
-
-# macOS
-brew install ffmpeg
-
-# Windows (with chocolatey)
-choco install ffmpeg
-```
-
-## Installation
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/atc-recorder.git
-cd atc-recorder
-
-# Install in development mode
-pip install -e .
-
-# Or install dependencies directly
-pip install -r requirements.txt
-```
-
-## Usage
-
-### List Available Feeds
-
-```bash
-# List all feeds for an airport
-atc-recorder feeds list kdca
-
-# Show detailed feed information
-atc-recorder feeds list kdca --verbose
-```
-
-### Record Live Streams
-
-```bash
-# Record a single feed for 30 minutes
-atc-recorder record kdca1_gnd --duration 30m
-
-# Record for 2 hours
-atc-recorder record kdca2_twr --duration 2h
-
-# Record all feeds for an airport
-atc-recorder record-all kdca --duration 1h
-```
-
-### Download Archives
-
-```bash
-# Download archives for a specific date
-atc-recorder download kdca1_gnd --date 2026-02-01
-
-# Download a range of hours
-atc-recorder download kdca1_gnd --date 2026-02-01 --start-hour 12 --hours 6
-```
-
-### Run as Daemon
-
-```bash
-# Run continuous recording with config file
-atc-recorder daemon --config config.yaml
-```
-
-### System Check
-
-```bash
-# Verify ffmpeg, network connectivity, and output directory
-atc-recorder check
-```
+All runtime dependencies (Python, ffmpeg, sox, etc.) are bundled inside the Docker image.
 
 ## Configuration
 
@@ -161,20 +87,13 @@ recordings/
         └── metadata.json
 ```
 
-## Docker
-
-The application is fully containerized with health checks, logging, and multiple service profiles.
-
-### Run Tests (Container)
+## Quick Start
 
 ```bash
-docker compose run --rm --entrypoint sh -v "$(pwd):/app" atc-recorder -lc \
-  "cd /app && python -m pip install --no-cache-dir pytest pytest-cov && python -m pytest -q -o cache_dir=/tmp/pytest-cache"
-```
+# Clone the repository
+git clone https://github.com/yourusername/atc-recorder.git
+cd atc-recorder
 
-### Quick Start
-
-```bash
 # Build the image
 docker compose build
 
@@ -186,6 +105,54 @@ docker compose run --rm atc-recorder record kdca1_gnd --duration 30m
 
 # Download historical archives
 docker compose --profile archive run --rm atc-archiver download kdca1_gnd --date 2026-02-01
+```
+
+## Usage
+
+### List Available Feeds
+
+```bash
+docker compose run --rm atc-recorder feeds list kdca
+
+# Show detailed feed information
+docker compose run --rm atc-recorder feeds list kdca --verbose
+```
+
+### Record Live Streams
+
+```bash
+# Record a single feed for 30 minutes
+docker compose run --rm atc-recorder record kdca1_gnd --duration 30m
+
+# Record for 2 hours
+docker compose run --rm atc-recorder record kdca2_twr --duration 2h
+
+# Record all feeds for an airport
+docker compose run --rm atc-recorder record-all kdca --duration 1h
+```
+
+### Download Archives
+
+```bash
+# Download archives for a specific date
+docker compose run --rm atc-recorder download kdca1_gnd --date 2026-02-01
+
+# Download a range of hours
+docker compose run --rm atc-recorder download kdca1_gnd --date 2026-02-01 --start-hour 12 --hours 6
+```
+
+### Run as Daemon
+
+```bash
+# Run continuous recording with config file
+docker compose run --rm atc-recorder daemon --config config.yaml
+```
+
+### System Check
+
+```bash
+# Verify ffmpeg, network connectivity, and output directory
+docker compose run --rm atc-recorder check
 ```
 
 ### One-Command Launcher
@@ -266,8 +233,9 @@ The project supports two NVIDIA NIM ASR workflows for transcription:
 - NVIDIA GPU with CUDA support
 - [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
 - NGC API Key from [NVIDIA Build](https://build.nvidia.com/openai/whisper-large-v3)
-- `sox` (optional, for `transcribe-compare` sox preprocessing method)
 - NVIDIA Maxine Audio Effects runtime (optional, for `--preprocess maxine`)
+
+Note: `ffmpeg` and `sox` are already included in the Docker image.
 
 #### Setup
 
@@ -564,6 +532,13 @@ Available environment variables:
 
 `rag.embedding.api_key_env` in `config.yaml` controls which environment variable name is read for the embedding API key (default: `NGC_API_KEY`).
 
+### Run Tests
+
+```bash
+docker compose run --rm --entrypoint sh -v "$(pwd):/app" atc-recorder -lc \
+  "cd /app && python -m pip install --no-cache-dir pytest pytest-cov && python -m pytest -q -o cache_dir=/tmp/pytest-cache"
+```
+
 ### Manual Docker Build
 
 ```bash
@@ -576,6 +551,32 @@ docker run -v $(pwd)/recordings:/app/recordings atc-recorder record kdca1_gnd --
 # Run system check
 docker run atc-recorder check
 ```
+
+## Bare-Metal Installation (Alternative)
+
+If you prefer running without Docker, install the host dependencies yourself:
+
+- Python 3.10+
+- ffmpeg (for live stream recording)
+- sox (optional, for `transcribe-compare` sox preprocessing)
+
+```bash
+# Ubuntu/Debian
+sudo apt install ffmpeg sox
+
+# macOS
+brew install ffmpeg sox
+```
+
+```bash
+# Install in development mode
+pip install -e .
+
+# Or install dependencies directly
+pip install -r requirements.txt
+```
+
+When running bare-metal, all CLI commands use `atc-recorder` directly instead of `docker compose run --rm atc-recorder`.
 
 ## Documentation
 
