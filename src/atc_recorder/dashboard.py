@@ -1714,6 +1714,13 @@ def create_app(config: Config) -> FastAPI:
         preprocess_name = body.get("preprocess", "")
 
         tcfg = _get_training_cfg()
+        vad_backend = body.get("vad_backend", tcfg.vad_backend)
+        vad_device = body.get("vad_device", tcfg.vad_device)
+        min_duration = float(body.get("min_duration", tcfg.min_chunk_duration))
+        max_duration = float(body.get("max_duration", tcfg.max_chunk_duration))
+        pad_seconds = float(body.get("pad_seconds", tcfg.pad_seconds))
+        energy_threshold = float(body.get("energy_threshold", tcfg.energy_threshold))
+
         chunk_store = ChunkStore(Path(tcfg.chunks_db_path))
         out_dir = Path(tcfg.chunks_dir)
 
@@ -1743,10 +1750,27 @@ def create_app(config: Config) -> FastAPI:
             "errors": [],
             "cancelled": False,
             "chunks_created": 0,
+            "diagnostics": {
+                "conversion_failures": 0,
+                "no_speech_files": 0,
+                "total_segments": 0,
+                "segments_too_short": 0,
+                "segments_too_long": 0,
+                "extract_failures": 0,
+                "energy_mean_sum": 0.0,
+                "energy_p95_sum": 0.0,
+                "energy_max_sum": 0.0,
+                "energy_sample_count": 0,
+                "vad_backend": vad_backend,
+                "total_vad_time": 0.0,
+                "total_extract_time": 0.0,
+                "total_wall_time": 0.0,
+            },
         }
 
         def _run_chunking():
             job = _batch_jobs[batch_id]
+            diag_summary = job["diagnostics"]
             for i, audio_path in enumerate(audio_files):
                 if job["cancelled"]:
                     job["status"] = "cancelled"
@@ -1754,16 +1778,35 @@ def create_app(config: Config) -> FastAPI:
                 job["current_file"] = audio_path.name
                 job["current_index"] = i
                 try:
-                    chunks = chunk_audio_file(
+                    chunks, diag = chunk_audio_file(
                         audio_path, out_dir, chunk_store,
                         preprocess_pipeline=preprocess_pipeline,
-                        min_duration=tcfg.min_chunk_duration,
-                        max_duration=tcfg.max_chunk_duration,
-                        pad_seconds=tcfg.pad_seconds,
-                        energy_threshold=tcfg.energy_threshold,
+                        min_duration=min_duration,
+                        max_duration=max_duration,
+                        pad_seconds=pad_seconds,
+                        energy_threshold=energy_threshold,
+                        vad_backend=vad_backend,
+                        vad_device=vad_device,
+                        collect_diagnostics=True,
                     )
                     job["completed"] += 1
                     job["chunks_created"] = job.get("chunks_created", 0) + len(chunks)
+                    if not diag.conversion_ok:
+                        diag_summary["conversion_failures"] += 1
+                    elif diag.segments_found == 0:
+                        diag_summary["no_speech_files"] += 1
+                    diag_summary["total_segments"] += diag.segments_found
+                    diag_summary["segments_too_short"] += diag.segments_too_short
+                    diag_summary["segments_too_long"] += diag.segments_too_long
+                    diag_summary["extract_failures"] += diag.extract_failures
+                    diag_summary["total_vad_time"] += diag.vad_time_sec
+                    diag_summary["total_extract_time"] += diag.extract_time_sec
+                    diag_summary["total_wall_time"] += diag.total_time_sec
+                    if diag.conversion_ok and diag.energy_max > 0:
+                        diag_summary["energy_mean_sum"] += diag.energy_mean
+                        diag_summary["energy_p95_sum"] += diag.energy_p95
+                        diag_summary["energy_max_sum"] += diag.energy_max
+                        diag_summary["energy_sample_count"] += 1
                 except Exception as exc:
                     job["failed"] += 1
                     job["errors"].append({"file": audio_path.name, "error": str(exc)})
@@ -1784,6 +1827,9 @@ def create_app(config: Config) -> FastAPI:
         parakeet_port = int(body.get("parakeet_port", os.environ.get("PARAKEET_GRPC_PORT", "50051")))
         max_cer = float(body.get("max_cer", 0.05))
         auto_filter = bool(body.get("auto_filter", True))
+        scope_feed = body.get("feed_id", "")
+        max_chunks = body.get("max_chunks")
+        skip_labeled = body.get("skip_labeled", True)
 
         try:
             from .transcribe import WhisperClient, RIVA_AVAILABLE
@@ -1796,11 +1842,24 @@ def create_app(config: Config) -> FastAPI:
         chunks_dir = Path(tcfg.chunks_dir)
         label_store = _get_label_store()
 
-        existing = {c.chunk_id for c in label_store.list_chunks(limit=100000)}
-        wav_files = sorted(chunks_dir.rglob("*.wav"))
-        unlabeled = [f for f in wav_files if not any(f.stem in eid for eid in existing)]
-        if not unlabeled:
+        scan_dir = chunks_dir
+        if scope_feed:
+            feed_dir = chunks_dir / scope_feed
+            if feed_dir.is_dir():
+                scan_dir = feed_dir
+
+        wav_files = sorted(scan_dir.rglob("*.wav"))
+
+        if skip_labeled:
+            existing = {c.chunk_id for c in label_store.list_chunks(limit=100000)}
+            unlabeled = [f for f in wav_files if not any(f.stem in eid for eid in existing)]
+            if not unlabeled:
+                unlabeled = wav_files
+        else:
             unlabeled = wav_files
+
+        if max_chunks:
+            unlabeled = unlabeled[:int(max_chunks)]
 
         if not unlabeled:
             return {"batch_id": None, "total": 0, "status": "no_files"}
@@ -1840,11 +1899,11 @@ def create_app(config: Config) -> FastAPI:
                     with _wave.open(str(wav_path), "rb") as wf:
                         duration = wf.getnframes() / wf.getframerate()
 
-                    w_result = w_client.transcribe(wav_path)
-                    w_text = w_result.get("text", "") if isinstance(w_result, dict) else str(w_result)
+                    w_result = w_client.transcribe_file(wav_path)
+                    w_text = w_result.text if w_result.success else ""
 
-                    p_result = p_client.transcribe(wav_path)
-                    p_text = p_result.get("text", "") if isinstance(p_result, dict) else str(p_result)
+                    p_result = p_client.transcribe_file(wav_path)
+                    p_text = p_result.text if p_result.success else ""
 
                     cer = character_error_rate(w_text, p_text)
                     feed_id, date = _parse_feed_and_date(wav_path.name)
@@ -1877,6 +1936,35 @@ def create_app(config: Config) -> FastAPI:
     @app.get("/api/labeling/summary")
     async def labeling_summary():
         return _get_label_store().summary()
+
+    @app.get("/api/labeling/chunk-count")
+    async def labeling_chunk_count():
+        return {"count": _get_chunk_store().count()}
+
+    @app.get("/api/labeling/chunk-stats")
+    async def labeling_chunk_stats():
+        cs = _get_chunk_store()
+        feeds = cs.stats_by_feed()
+        total_chunks = sum(f["count"] for f in feeds)
+        total_dur_hours = sum(f["total_dur"] for f in feeds) / 3600.0
+        return {
+            "feeds": feeds,
+            "total_chunks": total_chunks,
+            "total_duration_hours": round(total_dur_hours, 1),
+        }
+
+    @app.get("/api/labeling/chunk-browse")
+    async def labeling_chunk_browse(
+        feed_id: Optional[str] = None,
+        date: Optional[str] = None,
+        limit: int = Query(default=20, le=100),
+        offset: int = 0,
+    ):
+        cs = _get_chunk_store()
+        rows = cs.browse(feed_id=feed_id, date=date, limit=limit, offset=offset)
+        for r in rows:
+            r["audio_url"] = f"/api/labeling/audio/{r['chunk_id']}"
+        return {"chunks": rows, "limit": limit, "offset": offset}
 
     @app.get("/api/labeling/chunks")
     async def labeling_chunks(
@@ -1971,14 +2059,37 @@ def create_app(config: Config) -> FastAPI:
             raise HTTPException(400, f"Unknown action: {action}")
 
     @app.get("/api/labeling/audio/{chunk_id}")
-    async def labeling_audio(chunk_id: str):
+    async def labeling_audio(chunk_id: str, denoise: bool = False):
         chunk = _get_label_store().get_chunk(chunk_id)
         if chunk is None:
-            raise HTTPException(404, "Chunk not found")
-        audio_path = Path(chunk.audio_path)
+            cs = _get_chunk_store()
+            c = cs.get_chunk(chunk_id)
+            if c is None:
+                raise HTTPException(404, "Chunk not found")
+            audio_path = Path(c.output_path)
+        else:
+            audio_path = Path(chunk.audio_path)
         if not audio_path.exists():
             raise HTTPException(404, "Audio file not found")
-        return FileResponse(audio_path, media_type="audio/wav")
+
+        if not denoise:
+            return FileResponse(audio_path, media_type="audio/wav")
+
+        denoised_dir = audio_path.parent / ".denoised"
+        denoised_path = denoised_dir / audio_path.name
+        if denoised_path.exists():
+            return FileResponse(denoised_path, media_type="audio/wav")
+
+        try:
+            from .transcribe import preprocess_audio_maxine
+        except ImportError:
+            raise HTTPException(503, "Maxine dependencies not available")
+
+        denoised_dir.mkdir(parents=True, exist_ok=True)
+        ok = preprocess_audio_maxine(audio_path, denoised_path)
+        if not ok or not denoised_path.exists():
+            raise HTTPException(500, "Maxine denoising failed")
+        return FileResponse(denoised_path, media_type="audio/wav")
 
     # -------------------------------------------------------------------
     # Training / Benchmark API endpoints

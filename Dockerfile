@@ -28,8 +28,8 @@ COPY --chown=atc:atc pyproject.toml README.md ./
 COPY --chown=atc:atc src/ ./src/
 COPY --chown=atc:atc config.yaml ./
 
-# Install the package with dashboard visualization extras
-RUN pip install --no-cache-dir ".[dashboard-viz]"
+# Install the package with dashboard visualization and GPU VAD extras
+RUN pip install --no-cache-dir ".[dashboard-viz,gpu-vad]"
 
 # Create directories with proper permissions
 RUN mkdir -p /app/recordings /app/logs \

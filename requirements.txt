@@ -15,6 +15,10 @@ jinja2>=3.1.0
 numpy>=1.26.0
 scikit-learn>=1.4.0
 
+# GPU-accelerated VAD (optional - for Silero VAD on CUDA)
+# Install with: pip install 'atc-recorder[gpu-vad]' or: pip install torch
+# torch>=2.0.0
+
 # Transcription dependencies (optional - for ASR features)
 # Install with: pip install -r requirements-transcriber.txt
 # nvidia-riva-client>=2.14.0

@@ -11,8 +11,9 @@ import sqlite3
 import struct
 import subprocess
 import tempfile
+import time as _time
 import wave
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -39,6 +40,28 @@ class ChunkInfo:
     duration_seconds: float
     output_path: str
     created_at: str
+
+
+@dataclass
+class ChunkDiagnostics:
+    """Per-file diagnostic stats from the chunking pipeline."""
+
+    source_file: str = ""
+    conversion_ok: bool = True
+    segments_found: int = 0
+    segments_too_short: int = 0
+    segments_too_long: int = 0
+    segments_in_range: int = 0
+    extract_failures: int = 0
+    chunks_created: int = 0
+    energy_mean: float = 0.0
+    energy_p50: float = 0.0
+    energy_p95: float = 0.0
+    energy_max: float = 0.0
+    vad_backend: str = "energy"
+    vad_time_sec: float = 0.0
+    extract_time_sec: float = 0.0
+    total_time_sec: float = 0.0
 
 
 def _read_wav_samples(wav_path: Path) -> tuple[bytes, int]:
@@ -94,6 +117,20 @@ def _chunk_id(source_file: str, offset: float) -> str:
     return hashlib.sha1(raw.encode()).hexdigest()[:16]
 
 
+def _energy_stats(energies: list[float]) -> tuple[float, float, float, float]:
+    """Return (mean, p50, p95, max) for a list of energy values."""
+    if not energies:
+        return 0.0, 0.0, 0.0, 0.0
+    s = sorted(energies)
+    n = len(s)
+    return (
+        sum(s) / n,
+        s[n // 2],
+        s[int(n * 0.95)],
+        s[-1],
+    )
+
+
 def detect_speech_segments(
     wav_path: Path,
     *,
@@ -102,11 +139,15 @@ def detect_speech_segments(
     min_speech_sec: float = 0.3,
     min_silence_sec: float = 0.4,
     merge_gap_sec: float = 0.3,
-) -> list[tuple[float, float]]:
+    return_energy_stats: bool = False,
+) -> list[tuple[float, float]] | tuple[list[tuple[float, float]], tuple[float, float, float, float]]:
     """Energy-based VAD returning (start, end) pairs in seconds.
 
     Uses per-frame RMS energy to classify frames as speech or silence,
     then merges nearby speech regions and filters by minimum duration.
+
+    If *return_energy_stats* is True, returns a 2-tuple of
+    (segments, (mean, p50, p95, max)) so callers can diagnose threshold issues.
     """
     pcm_data, rate = _read_wav_samples(wav_path)
     frame_size = int(rate * frame_duration_ms / 1000)
@@ -152,7 +193,161 @@ def detect_speech_segments(
         else:
             expanded.append((adj_start, adj_end))
 
+    if return_energy_stats:
+        return expanded, _energy_stats(energies)
     return expanded
+
+
+_SILERO_MODEL_URL = (
+    "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.jit"
+)
+_silero_model = None
+
+
+def _load_silero_model(device: str = "cuda:0"):
+    """Download and cache the Silero VAD JIT model, bypassing torch.hub."""
+    global _silero_model
+    if _silero_model is not None:
+        return _silero_model
+
+    try:
+        import torch
+    except ImportError:
+        raise RuntimeError(
+            "PyTorch is required for Silero VAD. "
+            "Install with: pip install 'atc-recorder[gpu-vad]'"
+        )
+
+    cache_dir = Path.home() / ".cache" / "silero-vad"
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    model_path = cache_dir / "silero_vad.jit"
+
+    if not model_path.exists():
+        logger.info("Downloading Silero VAD model to %s ...", model_path)
+        import urllib.request
+        urllib.request.urlretrieve(_SILERO_MODEL_URL, model_path)
+
+    model = torch.jit.load(str(model_path), map_location=device)
+    model.eval()
+    _silero_model = model
+    logger.info("Silero VAD model loaded on %s", device)
+    return model
+
+
+def _read_wav_as_tensor(wav_path: Path, device: str = "cuda:0"):
+    """Read a 16kHz mono WAV into a float32 torch tensor (no torchaudio needed)."""
+    import numpy as np
+    import torch
+
+    pcm_data, _rate = _read_wav_samples(wav_path)
+    pcm_np = np.frombuffer(pcm_data, dtype=np.int16).astype(np.float32) / 32768.0
+    return torch.from_numpy(pcm_np).to(device)
+
+
+def _silero_get_speech_timestamps(
+    audio,
+    model,
+    *,
+    sampling_rate: int = 16000,
+    threshold: float = 0.5,
+    min_speech_duration_ms: int = 250,
+    min_silence_duration_ms: int = 100,
+    window_size_samples: int = 512,
+) -> list[dict]:
+    """Extract speech timestamps from audio using the Silero VAD JIT model.
+
+    Reimplements the core logic of silero-vad's get_speech_timestamps
+    so we don't need to import any hub/torchaudio/packaging code.
+    """
+    import torch
+
+    min_speech_samples = sampling_rate * min_speech_duration_ms // 1000
+    min_silence_samples = sampling_rate * min_silence_duration_ms // 1000
+
+    model.reset_states()
+
+    n_chunks = (len(audio) + window_size_samples - 1) // window_size_samples
+    if len(audio) % window_size_samples != 0:
+        padded = torch.nn.functional.pad(
+            audio, (0, n_chunks * window_size_samples - len(audio))
+        )
+    else:
+        padded = audio
+    chunks = padded.reshape(n_chunks, window_size_samples)
+
+    speech_probs = []
+    for chunk in chunks:
+        prob = model(chunk.unsqueeze(0), sampling_rate).item()
+        speech_probs.append(prob)
+
+    triggered = False
+    speeches: list[dict] = []
+    current_speech: dict = {}
+    neg_threshold = threshold - 0.15
+
+    for i, prob in enumerate(speech_probs):
+        if prob >= threshold and not triggered:
+            triggered = True
+            current_speech["start"] = i * window_size_samples
+        elif prob < neg_threshold and triggered:
+            current_speech["end"] = i * window_size_samples
+            if current_speech["end"] - current_speech["start"] >= min_speech_samples:
+                speeches.append(current_speech)
+            current_speech = {}
+            triggered = False
+
+    if triggered:
+        current_speech["end"] = len(audio)
+        if current_speech["end"] - current_speech["start"] >= min_speech_samples:
+            speeches.append(current_speech)
+
+    if speeches:
+        merged = [speeches[0]]
+        for s in speeches[1:]:
+            if s["start"] - merged[-1]["end"] < min_silence_samples:
+                merged[-1]["end"] = s["end"]
+            else:
+                merged.append(s)
+        speeches = merged
+
+    return speeches
+
+
+def detect_speech_segments_silero(
+    wav_path: Path,
+    *,
+    device: str = "cuda:0",
+    min_speech_sec: float = 0.3,
+    min_silence_sec: float = 0.4,
+    return_energy_stats: bool = False,
+) -> (
+    list[tuple[float, float]]
+    | tuple[list[tuple[float, float]], tuple[float, float, float, float]]
+):
+    """Silero-VAD-based speech detection returning (start, end) pairs in seconds.
+
+    Loads the Silero VAD JIT model directly (no torch.hub / torchaudio needed).
+    Return signature matches ``detect_speech_segments`` for drop-in use.
+    """
+    model = _load_silero_model(device)
+    wav = _read_wav_as_tensor(wav_path, device)
+
+    timestamps = _silero_get_speech_timestamps(
+        wav,
+        model,
+        sampling_rate=SAMPLE_RATE,
+        min_speech_duration_ms=int(min_speech_sec * 1000),
+        min_silence_duration_ms=int(min_silence_sec * 1000),
+    )
+
+    segments = [
+        (ts["start"] / SAMPLE_RATE, ts["end"] / SAMPLE_RATE)
+        for ts in timestamps
+    ]
+
+    if return_energy_stats:
+        return segments, (0.0, 0.0, 0.0, 0.0)
+    return segments
 
 
 def extract_chunk(
@@ -308,6 +503,71 @@ class ChunkStore:
                 row = conn.execute("SELECT COUNT(*) as cnt FROM chunks").fetchone()
         return row["cnt"] if row else 0
 
+    def stats_by_feed(self) -> list[dict]:
+        """Per-feed aggregate stats: count, duration range, date range."""
+        with self._conn() as conn:
+            rows = conn.execute("""
+                SELECT feed_id,
+                       COUNT(*)              AS count,
+                       MIN(duration_seconds) AS min_dur,
+                       AVG(duration_seconds) AS avg_dur,
+                       MAX(duration_seconds) AS max_dur,
+                       SUM(duration_seconds) AS total_dur,
+                       MIN(date)             AS earliest,
+                       MAX(date)             AS latest
+                FROM chunks GROUP BY feed_id ORDER BY feed_id
+            """).fetchall()
+        return [
+            {
+                "feed_id": r["feed_id"],
+                "count": r["count"],
+                "min_dur": round(r["min_dur"], 2),
+                "avg_dur": round(r["avg_dur"], 2),
+                "max_dur": round(r["max_dur"], 2),
+                "total_dur": round(r["total_dur"], 1),
+                "earliest": r["earliest"],
+                "latest": r["latest"],
+            }
+            for r in rows
+        ]
+
+    def browse(
+        self,
+        feed_id: Optional[str] = None,
+        date: Optional[str] = None,
+        limit: int = 20,
+        offset: int = 0,
+    ) -> list[dict]:
+        """Paginated chunk listing for the explorer UI."""
+        clauses: list[str] = []
+        params: list[object] = []
+        if feed_id:
+            clauses.append("feed_id = ?")
+            params.append(feed_id)
+        if date:
+            clauses.append("date = ?")
+            params.append(date)
+
+        where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+        params.extend([limit, offset])
+
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM chunks{where} ORDER BY feed_id, source_file, offset_seconds LIMIT ? OFFSET ?",
+                params,
+            ).fetchall()
+        return [
+            {
+                "chunk_id": r["chunk_id"],
+                "source_file": r["source_file"],
+                "feed_id": r["feed_id"],
+                "date": r["date"],
+                "offset_seconds": round(r["offset_seconds"], 1),
+                "duration_seconds": round(r["duration_seconds"], 1),
+            }
+            for r in rows
+        ]
+
 
 def _parse_feed_and_date(filename: str) -> tuple[str, str]:
     """Extract feed_id and date from a standard recording filename.
@@ -335,54 +595,93 @@ def chunk_audio_file(
     energy_threshold: float = 500.0,
     min_silence_sec: float = 0.4,
     merge_gap_sec: float = 0.3,
+    vad_backend: str = "energy",
+    vad_device: str = "cuda:0",
     progress_callback: Optional[callable] = None,
-) -> list[ChunkInfo]:
+    collect_diagnostics: bool = False,
+) -> list[ChunkInfo] | tuple[list[ChunkInfo], ChunkDiagnostics]:
     """Chunk a single audio file into training segments.
 
     Returns list of ChunkInfo for successfully created chunks.
+    When *collect_diagnostics* is True, returns ``(chunks, diagnostics)``
+    so callers can report why chunks were dropped.
+
+    *vad_backend* selects the speech detection method: ``"energy"`` for
+    the CPU-based RMS energy approach, ``"silero"`` for the GPU-accelerated
+    Silero VAD neural network.
     """
+    t_total_start = _time.perf_counter()
+    diag = ChunkDiagnostics(source_file=audio_path.name, vad_backend=vad_backend)
     feed_id, date = _parse_feed_and_date(audio_path.name)
     chunks_dir = output_dir / feed_id / date
     chunks_dir.mkdir(parents=True, exist_ok=True)
+
+    def _result(chunks: list[ChunkInfo]):
+        diag.chunks_created = len(chunks)
+        diag.total_time_sec = _time.perf_counter() - t_total_start
+        if collect_diagnostics:
+            return chunks, diag
+        return chunks
 
     with tempfile.TemporaryDirectory() as tmpdir:
         tmpdir_path = Path(tmpdir)
         wav_path = tmpdir_path / "source.wav"
 
-        # Preprocess then convert to WAV
         if preprocess_pipeline and preprocess_pipeline.steps:
             preprocessed = tmpdir_path / "preprocessed.wav"
             executor = PipelineExecutor()
             if not executor.run(audio_path, preprocess_pipeline, preprocessed):
                 logger.error("Preprocessing failed for %s", audio_path)
-                return []
+                diag.conversion_ok = False
+                return _result([])
             wav_path = preprocessed
         else:
             if not _convert_to_wav(audio_path, wav_path):
                 logger.error("WAV conversion failed for %s", audio_path)
-                return []
+                diag.conversion_ok = False
+                return _result([])
 
-        segments = detect_speech_segments(
-            wav_path,
-            energy_threshold=energy_threshold,
-            min_silence_sec=min_silence_sec,
-            merge_gap_sec=merge_gap_sec,
-        )
+        t_vad_start = _time.perf_counter()
+        if vad_backend == "silero":
+            segments, e_stats = detect_speech_segments_silero(
+                wav_path,
+                device=vad_device,
+                min_speech_sec=0.3,
+                min_silence_sec=min_silence_sec,
+                return_energy_stats=True,
+            )
+        else:
+            segments, e_stats = detect_speech_segments(
+                wav_path,
+                energy_threshold=energy_threshold,
+                min_silence_sec=min_silence_sec,
+                merge_gap_sec=merge_gap_sec,
+                return_energy_stats=True,
+            )
+        diag.vad_time_sec = _time.perf_counter() - t_vad_start
+        diag.energy_mean, diag.energy_p50, diag.energy_p95, diag.energy_max = e_stats
+        diag.segments_found = len(segments)
 
+        t_extract_start = _time.perf_counter()
         results: list[ChunkInfo] = []
         for start, end in segments:
             duration = end - start
-            if duration < min_duration or duration > max_duration:
+            if duration < min_duration:
+                diag.segments_too_short += 1
                 continue
+            if duration > max_duration:
+                diag.segments_too_long += 1
+                continue
+            diag.segments_in_range += 1
 
             cid = _chunk_id(audio_path.name, start)
             chunk_filename = f"{audio_path.stem}_chunk_{start:.1f}s.wav"
             chunk_path = chunks_dir / chunk_filename
 
             if not extract_chunk(wav_path, start, end, chunk_path, pad_sec=pad_seconds):
+                diag.extract_failures += 1
                 continue
 
-            # Verify actual output duration
             try:
                 with wave.open(str(chunk_path), "rb") as wf:
                     actual_dur = wf.getnframes() / wf.getframerate()
@@ -405,12 +704,16 @@ def chunk_audio_file(
             if progress_callback:
                 progress_callback(info)
 
+        diag.extract_time_sec = _time.perf_counter() - t_extract_start
+
     logger.info(
-        "Chunked %s: %d segments found, %d chunks kept (%.1f-%.1fs)",
+        "Chunked %s [%s]: %d segments found, %d chunks kept (%.1f-%.1fs) in %.2fs",
         audio_path.name,
+        vad_backend,
         len(segments),
         len(results),
         min_duration,
         max_duration,
+        diag.total_time_sec,
     )
-    return results
+    return _result(results)

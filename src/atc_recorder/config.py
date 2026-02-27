@@ -146,6 +146,8 @@ class TrainingConfig:
     max_chunk_duration: float = 15.0
     pad_seconds: float = 0.5
     energy_threshold: float = 500.0
+    vad_backend: str = "energy"
+    vad_device: str = "cuda:0"
     max_cer: float = 0.05
     lexicon: LexiconConfig = field(default_factory=LexiconConfig)
     default_model: str = "whisper"
@@ -310,6 +312,8 @@ class Config:
                 max_chunk_duration=tr.get("max_chunk_duration", 15.0),
                 pad_seconds=tr.get("pad_seconds", 0.5),
                 energy_threshold=tr.get("energy_threshold", 500.0),
+                vad_backend=tr.get("vad_backend", "energy"),
+                vad_device=tr.get("vad_device", "cuda:0"),
                 max_cer=tr.get("max_cer", 0.05),
                 lexicon=LexiconConfig(
                     waypoints=lex_data.get("waypoints", {}),
@@ -439,6 +443,8 @@ class Config:
                 "max_chunk_duration": self.training.max_chunk_duration,
                 "pad_seconds": self.training.pad_seconds,
                 "energy_threshold": self.training.energy_threshold,
+                "vad_backend": self.training.vad_backend,
+                "vad_device": self.training.vad_device,
                 "max_cer": self.training.max_cer,
                 "default_model": self.training.default_model,
                 "lexicon": {

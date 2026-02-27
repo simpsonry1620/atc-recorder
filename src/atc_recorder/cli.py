@@ -2174,6 +2174,18 @@ def training() -> None:
 @click.option("--energy-threshold", type=float, default=500.0, help="VAD energy threshold")
 @click.option("--preprocess", type=str, default=None, help="Pipeline preset for preprocessing before chunking")
 @click.option("--pattern", type=str, default="*.mp3", help="File glob pattern")
+@click.option(
+    "--vad-backend",
+    type=click.Choice(["energy", "silero"]),
+    default=None,
+    help="VAD backend: energy (CPU) or silero (GPU-accelerated). Default: from config.",
+)
+@click.option(
+    "--vad-device",
+    type=str,
+    default=None,
+    help="CUDA device for Silero VAD, e.g. cuda:0 (default: from config)",
+)
 @click.pass_context
 def training_chunk(
     ctx: click.Context,
@@ -2185,11 +2197,15 @@ def training_chunk(
     energy_threshold: float,
     preprocess: Optional[str],
     pattern: str,
+    vad_backend: Optional[str],
+    vad_device: Optional[str],
 ) -> None:
     """Chunk audio recordings into training segments via VAD.
 
     INPUT_DIR is the directory containing audio files to chunk.
     """
+    import wave as _wave
+
     from .chunker import ChunkStore, chunk_audio_file
     from .pipeline import PipelineDefinition, PipelinePresetStore
 
@@ -2197,6 +2213,9 @@ def training_chunk(
     tcfg = _get_training_config(cfg)
     out = output_dir or Path(tcfg.chunks_dir)
     db_path = Path(tcfg.chunks_db_path)
+
+    effective_vad_backend = vad_backend or tcfg.vad_backend
+    effective_vad_device = vad_device or tcfg.vad_device
 
     chunk_store = ChunkStore(db_path)
 
@@ -2217,16 +2236,25 @@ def training_chunk(
     console.print(f"  Output: {out}")
     console.print(f"  Duration range: {min_duration}-{max_duration}s")
     console.print(f"  Padding: {pad}s")
+    backend_label = effective_vad_backend.upper()
+    if effective_vad_backend == "silero":
+        console.print(f"  VAD backend: [cyan]{backend_label}[/cyan] (GPU: {effective_vad_device})")
+    else:
+        console.print(f"  VAD backend: {backend_label} (CPU)")
+        console.print(f"  Energy threshold: {energy_threshold}")
     console.print()
 
+    from .chunker import ChunkDiagnostics
+
     total_chunks = 0
+    all_diags: list[ChunkDiagnostics] = []
     with Progress(
         SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
         BarColumn(), TaskProgressColumn(), console=console,
     ) as progress:
         task = progress.add_task("Chunking...", total=len(audio_files))
         for audio_file in audio_files:
-            chunks = chunk_audio_file(
+            chunks, diag = chunk_audio_file(
                 audio_file,
                 out,
                 chunk_store,
@@ -2235,11 +2263,95 @@ def training_chunk(
                 max_duration=max_duration,
                 pad_seconds=pad,
                 energy_threshold=energy_threshold,
+                vad_backend=effective_vad_backend,
+                vad_device=effective_vad_device,
+                collect_diagnostics=True,
             )
             total_chunks += len(chunks)
+            all_diags.append(diag)
             progress.update(task, advance=1, description=f"{audio_file.name}: {len(chunks)} chunks")
 
     console.print(f"\n[green]Done: {total_chunks} chunks from {len(audio_files)} files[/green]")
+
+    # --- Performance metrics table ---
+    if all_diags:
+        total_vad_time = sum(d.vad_time_sec for d in all_diags)
+        total_extract_time = sum(d.extract_time_sec for d in all_diags)
+        total_wall_time = sum(d.total_time_sec for d in all_diags)
+
+        total_audio_dur = 0.0
+        for audio_file in audio_files:
+            try:
+                with _wave.open(str(audio_file), "rb") as wf:
+                    total_audio_dur += wf.getnframes() / wf.getframerate()
+            except Exception:
+                pass
+
+        timing_table = Table(title="Performance Metrics")
+        timing_table.add_column("Metric", style="bold")
+        timing_table.add_column("Value", justify="right")
+        timing_table.add_row("VAD backend", effective_vad_backend)
+        if effective_vad_backend == "silero":
+            timing_table.add_row("Device", effective_vad_device)
+        timing_table.add_row("Files processed", str(len(audio_files)))
+        timing_table.add_row("Chunks created", str(total_chunks))
+        timing_table.add_row("VAD time", f"{total_vad_time:.2f}s")
+        timing_table.add_row("Extraction time", f"{total_extract_time:.2f}s")
+        timing_table.add_row("Total wall time", f"{total_wall_time:.2f}s")
+        if total_audio_dur > 0:
+            rt_factor = total_wall_time / total_audio_dur
+            timing_table.add_row("Audio duration", f"{total_audio_dur:.1f}s")
+            timing_table.add_row("Realtime factor", f"{rt_factor:.4f}x")
+        console.print()
+        console.print(timing_table)
+
+    if total_chunks == 0 and all_diags:
+        conv_fail = sum(1 for d in all_diags if not d.conversion_ok)
+        no_segments = sum(1 for d in all_diags if d.conversion_ok and d.segments_found == 0)
+        all_too_short = sum(1 for d in all_diags if d.segments_found > 0 and d.segments_too_short == d.segments_found)
+        all_too_long = sum(1 for d in all_diags if d.segments_found > 0 and d.segments_too_long == d.segments_found)
+        some_filtered = sum(1 for d in all_diags if d.segments_found > 0 and d.segments_in_range > 0 and d.chunks_created == 0)
+        total_segs = sum(d.segments_found for d in all_diags)
+        total_too_short = sum(d.segments_too_short for d in all_diags)
+        total_too_long = sum(d.segments_too_long for d in all_diags)
+        total_extract_fail = sum(d.extract_failures for d in all_diags)
+
+        ok_diags = [d for d in all_diags if d.conversion_ok and d.energy_max > 0]
+        avg_energy_mean = sum(d.energy_mean for d in ok_diags) / len(ok_diags) if ok_diags else 0
+        avg_energy_p95 = sum(d.energy_p95 for d in ok_diags) / len(ok_diags) if ok_diags else 0
+        avg_energy_max = sum(d.energy_max for d in ok_diags) / len(ok_diags) if ok_diags else 0
+
+        console.print("\n[yellow bold]Diagnostic summary (why 0 chunks):[/yellow bold]")
+        console.print(f"  Conversion failures:     {conv_fail} / {len(audio_files)} files")
+        console.print(f"  No speech detected:      {no_segments} files")
+        console.print(f"  All segments too short:   {all_too_short} files (< {min_duration}s)")
+        console.print(f"  All segments too long:    {all_too_long} files (> {max_duration}s)")
+        console.print(f"  Extract failures:        {total_extract_fail}")
+        if some_filtered:
+            console.print(f"  In-range but failed:     {some_filtered} files")
+        console.print(f"\n  Total segments found:    {total_segs}")
+        console.print(f"    Too short:             {total_too_short}")
+        console.print(f"    Too long:              {total_too_long}")
+
+        if effective_vad_backend == "energy":
+            console.print(f"\n[cyan]  Audio energy levels (threshold={energy_threshold}):[/cyan]")
+            console.print(f"    Average mean energy:   {avg_energy_mean:.0f}")
+            console.print(f"    Average 95th pctl:     {avg_energy_p95:.0f}")
+            console.print(f"    Average max energy:    {avg_energy_max:.0f}")
+
+            if avg_energy_p95 < energy_threshold:
+                suggested = max(50, avg_energy_mean * 1.5)
+                console.print(
+                    f"\n  [yellow]Hint: Audio energy (p95={avg_energy_p95:.0f}) is below "
+                    f"threshold ({energy_threshold}). Try --energy-threshold {suggested:.0f}[/yellow]"
+                )
+            elif no_segments == 0 and total_too_long > 0 and total_too_short == 0:
+                console.print(
+                    f"\n  [yellow]Hint: All {total_too_long} segments exceed {max_duration}s. "
+                    f"The audio may have constant noise above the threshold, "
+                    f"causing huge speech regions. Try raising --energy-threshold "
+                    f"or increasing --max-duration.[/yellow]"
+                )
 
 
 @training.command("label")

@@ -399,6 +399,15 @@
               <p class="text-gray-400 text-sm max-w-lg mx-auto">Chunk your recordings, label them with dual-ASR, then review and verify the results below.</p>
             </div>
 
+            <!-- Dataset overview banner -->
+            <div id="lb-dataset-stats" class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-6">
+              <div class="stat-card"><div class="stat-label">Feeds</div><div id="lb-ds-feeds" class="stat-value">--</div></div>
+              <div class="stat-card"><div class="stat-label">Recordings</div><div id="lb-ds-recordings" class="stat-value">--</div></div>
+              <div class="stat-card"><div class="stat-label">Audio Hours</div><div id="lb-ds-hours" class="stat-value">--</div></div>
+              <div class="stat-card"><div class="stat-label">Chunks</div><div id="lb-ds-chunks" class="stat-value">--</div></div>
+              <div class="stat-card"><div class="stat-label">Labeled</div><div id="lb-ds-labeled" class="stat-value">--</div></div>
+            </div>
+
             <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
 
               <!-- Step 1: Chunk -->
@@ -413,6 +422,46 @@
                   <select id="lb-chunk-feed" class="input w-full text-xs h-8">
                     <option value="">All feeds</option>
                   </select>
+                </div>
+                <div class="mb-3">
+                  <label class="text-xs text-gray-400 mb-1 block">VAD Backend</label>
+                  <select id="lb-vad-backend" class="input w-full text-xs h-8">
+                    <option value="energy">Energy (CPU)</option>
+                    <option value="silero">Silero (GPU)</option>
+                  </select>
+                </div>
+                <button type="button" id="lb-chunk-adv-toggle" class="text-xs text-brand-400 hover:underline mb-2 text-left">Show Advanced Options</button>
+                <div id="lb-chunk-advanced" class="hidden space-y-2 mb-3 border-t border-gray-800 pt-2">
+                  <div class="grid grid-cols-2 gap-2">
+                    <div>
+                      <label class="text-xs text-gray-500 block">Min duration (s)</label>
+                      <input id="lb-chunk-min-dur" type="number" class="input w-full text-xs h-7" value="2.0" step="0.5" min="0.5" max="30" />
+                    </div>
+                    <div>
+                      <label class="text-xs text-gray-500 block">Max duration (s)</label>
+                      <input id="lb-chunk-max-dur" type="number" class="input w-full text-xs h-7" value="15.0" step="1" min="1" max="60" />
+                    </div>
+                  </div>
+                  <div class="grid grid-cols-2 gap-2">
+                    <div>
+                      <label class="text-xs text-gray-500 block">Padding (s)</label>
+                      <input id="lb-chunk-pad" type="number" class="input w-full text-xs h-7" value="0.5" step="0.1" min="0" max="3" />
+                    </div>
+                    <div id="lb-energy-thresh-wrap">
+                      <label class="text-xs text-gray-500 block">Energy threshold</label>
+                      <input id="lb-chunk-energy" type="number" class="input w-full text-xs h-7" value="500" step="50" min="10" />
+                    </div>
+                  </div>
+                  <div>
+                    <label class="text-xs text-gray-500 block">Preprocessing preset</label>
+                    <select id="lb-chunk-preset" class="input w-full text-xs h-7">
+                      <option value="">None</option>
+                    </select>
+                  </div>
+                  <div>
+                    <label class="text-xs text-gray-500 block">File pattern</label>
+                    <input id="lb-chunk-pattern" type="text" class="input w-full text-xs h-7" value="*.mp3" />
+                  </div>
                 </div>
                 <div class="mt-auto space-y-2">
                   <button id="lb-start-chunk" class="btn-primary w-full h-9 text-sm">Start Chunking</button>
@@ -432,12 +481,28 @@
                 </div>
                 <p class="text-xs text-gray-500 mb-4">Run Whisper and Parakeet on each chunk, then auto-filter by Character Error Rate agreement.</p>
                 <div class="mb-2">
-                  <label class="text-xs text-gray-400 mb-1 block">CER threshold</label>
-                  <input id="lb-label-cer" type="number" class="input w-full text-xs h-8" value="0.05" step="0.01" min="0" max="1" />
+                  <label class="text-xs text-gray-400 mb-1 block">Feed (optional)</label>
+                  <select id="lb-label-feed" class="input w-full text-xs h-8">
+                    <option value="">All feeds</option>
+                  </select>
                 </div>
-                <label class="flex items-center gap-2 text-xs text-gray-400 mb-3 cursor-pointer">
+                <div class="grid grid-cols-2 gap-2 mb-2">
+                  <div>
+                    <label class="text-xs text-gray-400 mb-1 block">CER threshold</label>
+                    <input id="lb-label-cer" type="number" class="input w-full text-xs h-8" value="0.05" step="0.01" min="0" max="1" />
+                  </div>
+                  <div>
+                    <label class="text-xs text-gray-400 mb-1 block">Max chunks</label>
+                    <input id="lb-label-max" type="number" class="input w-full text-xs h-8" placeholder="all" min="1" />
+                  </div>
+                </div>
+                <label class="flex items-center gap-2 text-xs text-gray-400 mb-2 cursor-pointer">
                   <input type="checkbox" id="lb-auto-filter" checked class="accent-brand-500" />
                   Auto-filter after labeling
+                </label>
+                <label class="flex items-center gap-2 text-xs text-gray-400 mb-3 cursor-pointer">
+                  <input type="checkbox" id="lb-skip-labeled" checked class="accent-brand-500" />
+                  Skip already labeled
                 </label>
                 <div class="mt-auto space-y-2">
                   <button id="lb-start-label" class="btn-primary w-full h-9 text-sm" disabled>Start Labeling</button>
@@ -467,6 +532,55 @@
                 </div>
               </div>
 
+            </div>
+
+            <!-- Performance comparison panel -->
+            <div id="lb-perf-panel" class="hidden mt-5">
+              <div class="rounded-xl border border-gray-800 bg-gray-900/50 p-4">
+                <h3 class="text-sm font-semibold text-gray-200 mb-3">Performance Metrics</h3>
+                <div id="lb-perf-body" class="overflow-x-auto">
+                  <table class="w-full text-xs">
+                    <thead class="text-gray-500 border-b border-gray-800"><tr><th class="text-left py-1 pr-4">Metric</th><th id="lb-perf-col1" class="text-right py-1 px-3">Run 1</th><th id="lb-perf-col2" class="text-right py-1 px-3 hidden">Run 2</th></tr></thead>
+                    <tbody id="lb-perf-tbody"></tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            <!-- Chunk explorer -->
+            <div id="lb-chunk-explorer" class="mt-5">
+              <button type="button" id="lb-explorer-toggle" class="flex items-center gap-2 text-sm text-brand-400 hover:underline mb-3">
+                <span id="lb-explorer-arrow" class="transition-transform">&#9654;</span>
+                <span>Browse Chunks (<span id="lb-explorer-count">--</span>)</span>
+              </button>
+              <div id="lb-explorer-body" class="hidden space-y-4">
+                <div class="overflow-x-auto">
+                  <table class="w-full text-xs">
+                    <thead class="text-gray-500 border-b border-gray-800">
+                      <tr><th class="text-left py-1">Feed</th><th class="text-right py-1">Chunks</th><th class="text-right py-1">Duration</th><th class="text-right py-1">Avg Dur</th><th class="text-left py-1 pl-3">Date Range</th></tr>
+                    </thead>
+                    <tbody id="lb-explorer-stats"></tbody>
+                  </table>
+                </div>
+                <div class="border-t border-gray-800 pt-3">
+                  <div class="flex gap-2 items-end mb-2">
+                    <div>
+                      <label class="text-xs text-gray-500 block">Feed</label>
+                      <select id="lb-browse-feed" class="input text-xs h-7 w-36"><option value="">All</option></select>
+                    </div>
+                    <button id="lb-browse-refresh" class="btn-secondary h-7 text-xs px-3">Refresh</button>
+                    <button id="lb-browse-more" class="btn-secondary h-7 text-xs px-3">Load More</button>
+                  </div>
+                  <div class="overflow-x-auto">
+                    <table class="w-full text-xs">
+                      <thead class="text-gray-500 border-b border-gray-800">
+                        <tr><th class="text-left py-1">ID</th><th class="text-left py-1">Feed</th><th class="text-left py-1">Source</th><th class="text-right py-1">Offset</th><th class="text-right py-1">Dur</th><th class="py-1">Play</th></tr>
+                      </thead>
+                      <tbody id="lb-browse-tbody"></tbody>
+                    </table>
+                  </div>
+                </div>
+              </div>
             </div>
 
             <div class="mt-6 text-center">
@@ -529,6 +643,11 @@
             <h3 class="card-title mb-3">Review Chunk</h3>
             <div class="mb-3">
               <audio id="lb-audio" controls class="w-full rounded-lg"></audio>
+              <label class="flex items-center gap-2 text-xs text-gray-400 mt-2 cursor-pointer">
+                <input type="checkbox" id="lb-denoise-toggle" class="accent-brand-500" />
+                Maxine Denoise
+                <span id="lb-denoise-status" class="text-gray-600"></span>
+              </label>
             </div>
             <div class="grid grid-cols-1 md:grid-cols-2 gap-4 mb-3">
               <div>
