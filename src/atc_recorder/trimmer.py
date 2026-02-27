@@ -25,7 +25,7 @@ class TrimResult:
     """Outcome of trimming a single chunk."""
 
     chunk_id: str
-    success: bool
+    success: bool = False
     trim_start_sec: float = 0.0
     trim_end_sec: float = 0.0
     original_duration: float = 0.0
