@@ -408,7 +408,7 @@
               <div class="stat-card"><div class="stat-label">Labeled</div><div id="lb-ds-labeled" class="stat-value">--</div></div>
             </div>
 
-            <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
+            <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-5">
 
               <!-- Step 1: Chunk -->
               <div id="lb-step1" class="rounded-xl border border-gray-800 bg-gray-900/50 p-5 flex flex-col">
@@ -514,10 +514,47 @@
                 </div>
               </div>
 
-              <!-- Step 3: Review -->
-              <div id="lb-step3" class="rounded-xl border border-gray-800 bg-gray-900/50 p-5 flex flex-col">
+              <!-- Step 3: Trim -->
+              <div id="lb-step-trim" class="rounded-xl border border-gray-800 bg-gray-900/50 p-5 flex flex-col">
                 <div class="flex items-center gap-2 mb-3">
                   <span class="flex items-center justify-center w-7 h-7 rounded-full bg-brand-900/50 text-brand-400 text-sm font-bold shrink-0">3</span>
+                  <h3 class="text-sm font-semibold text-gray-200">Trim to Transcript</h3>
+                </div>
+                <p class="text-xs text-gray-500 mb-4">Remove leading/trailing dialog bleed by trimming audio to match Whisper word timestamps. Originals are archived.</p>
+                <div class="mb-2">
+                  <label class="text-xs text-gray-400 mb-1 block">Feed (optional)</label>
+                  <select id="lb-trim-feed" class="input w-full text-xs h-8">
+                    <option value="">All feeds</option>
+                  </select>
+                </div>
+                <div class="grid grid-cols-2 gap-2 mb-2">
+                  <div>
+                    <label class="text-xs text-gray-400 mb-1 block">Onset pad (s)</label>
+                    <input id="lb-trim-onset" type="number" class="input w-full text-xs h-8" value="0.1" step="0.05" min="0" max="1" />
+                  </div>
+                  <div>
+                    <label class="text-xs text-gray-400 mb-1 block">Offset pad (s)</label>
+                    <input id="lb-trim-offset" type="number" class="input w-full text-xs h-8" value="0.1" step="0.05" min="0" max="1" />
+                  </div>
+                </div>
+                <div class="mb-3">
+                  <label class="text-xs text-gray-400 mb-1 block">Max chunks</label>
+                  <input id="lb-trim-max" type="number" class="input w-full text-xs h-8" placeholder="all" min="1" />
+                </div>
+                <div class="mt-auto space-y-2">
+                  <button id="lb-start-trim" class="btn-primary w-full h-9 text-sm" disabled>Start Trimming</button>
+                  <div id="lb-trim-progress" class="hidden">
+                    <div class="wf-progress-track"><div id="lb-trim-bar" class="wf-progress-bar" style="width:0%"></div></div>
+                    <div id="lb-trim-status" class="text-xs text-gray-500 mt-1">Starting...</div>
+                  </div>
+                  <div id="lb-trim-done" class="hidden text-xs text-green-400"></div>
+                </div>
+              </div>
+
+              <!-- Step 4: Review -->
+              <div id="lb-step3" class="rounded-xl border border-gray-800 bg-gray-900/50 p-5 flex flex-col">
+                <div class="flex items-center gap-2 mb-3">
+                  <span class="flex items-center justify-center w-7 h-7 rounded-full bg-brand-900/50 text-brand-400 text-sm font-bold shrink-0">4</span>
                   <h3 class="text-sm font-semibold text-gray-200">Review Labels</h3>
                 </div>
                 <p class="text-xs text-gray-500 mb-4">Listen to each segment, compare ASR outputs, and verify or correct the transcriptions.</p>

@@ -1661,7 +1661,7 @@ def create_app(config: Config) -> FastAPI:
         job = _batch_jobs.get(batch_id)
         if job is None:
             raise HTTPException(404, "Batch job not found")
-        return {
+        resp = {
             "batch_id": batch_id,
             "status": job["status"],
             "total": job["total"],
@@ -1670,6 +1670,11 @@ def create_app(config: Config) -> FastAPI:
             "current_file": job["current_file"],
             "errors": job["errors"][-20:],
         }
+        for extra_key in ("labeled", "accepted", "rejected", "chunks_created",
+                          "diagnostics", "trimmed", "skipped", "total_saved_sec"):
+            if extra_key in job:
+                resp[extra_key] = job[extra_key]
+        return resp
 
     @app.post("/api/pipeline/batch/{batch_id}/cancel")
     async def pipeline_batch_cancel(batch_id: str):
@@ -1932,6 +1937,93 @@ def create_app(config: Config) -> FastAPI:
         thread = threading.Thread(target=_run_labeling, daemon=True)
         thread.start()
         return {"batch_id": batch_id, "total": len(unlabeled), "status": "running"}
+
+    @app.post("/api/labeling/start-trimming")
+    async def labeling_start_trimming(request: Request):
+        """Trim labeled chunks to align audio with transcribed text."""
+        body = await request.json()
+        whisper_host = body.get("whisper_host", os.environ.get("WHISPER_GRPC_HOST", "whisper-asr"))
+        whisper_port = int(body.get("whisper_port", os.environ.get("WHISPER_GRPC_PORT", "50051")))
+        onset_pad = float(body.get("onset_pad", 0.1))
+        offset_pad = float(body.get("offset_pad", 0.1))
+        status_filter = body.get("status") or None
+        feed_filter = body.get("feed_id") or None
+        max_chunks = int(body.get("max_chunks", 0))
+
+        try:
+            from .transcribe import WhisperClient, RIVA_AVAILABLE
+        except ImportError:
+            raise HTTPException(503, "Transcription dependencies not available")
+        if not RIVA_AVAILABLE:
+            raise HTTPException(503, "ASR client dependency missing (nvidia-riva-client)")
+
+        tcfg = _get_training_cfg()
+        label_store = _get_label_store()
+        archive_dir = Path(tcfg.chunks_dir).parent / "chunks_archive"
+
+        untrimmed = label_store.list_untrimmed_chunks(
+            status=status_filter, feed_id=feed_filter,
+        )
+        if max_chunks > 0:
+            untrimmed = untrimmed[:max_chunks]
+
+        if not untrimmed:
+            return {"batch_id": None, "total": 0, "status": "no_untrimmed"}
+
+        batch_id = uuid.uuid4().hex[:12]
+        _batch_jobs[batch_id] = {
+            "status": "running",
+            "total": len(untrimmed),
+            "completed": 0,
+            "failed": 0,
+            "skipped": 0,
+            "current_file": None,
+            "current_index": 0,
+            "errors": [],
+            "cancelled": False,
+            "trimmed": 0,
+            "total_saved_sec": 0.0,
+        }
+
+        def _run_trimming():
+            from .trimmer import trim_chunk
+
+            job = _batch_jobs[batch_id]
+            w_client = WhisperClient(grpc_host=whisper_host, grpc_port=whisper_port)
+            ls = _get_label_store()
+
+            for i, chunk in enumerate(untrimmed):
+                if job["cancelled"]:
+                    job["status"] = "cancelled"
+                    return
+                job["current_file"] = Path(chunk.audio_path).name
+                job["current_index"] = i
+                try:
+                    result = trim_chunk(
+                        chunk, w_client, ls, archive_dir,
+                        onset_pad=onset_pad, offset_pad=offset_pad,
+                    )
+                    if result.success:
+                        job["trimmed"] = job.get("trimmed", 0) + 1
+                        job["total_saved_sec"] += result.original_duration - result.trimmed_duration
+                        job["completed"] += 1
+                    elif result.skipped:
+                        job["skipped"] = job.get("skipped", 0) + 1
+                        job["completed"] += 1
+                    else:
+                        job["failed"] += 1
+                        job["errors"].append({"file": chunk.audio_path, "error": result.error})
+                except Exception as exc:
+                    job["failed"] += 1
+                    job["errors"].append({"file": chunk.audio_path, "error": str(exc)})
+                    logger.warning("Trimming failed %s: %s", chunk.audio_path, exc)
+
+            job["status"] = "completed"
+            job["current_file"] = None
+
+        thread = threading.Thread(target=_run_trimming, daemon=True)
+        thread.start()
+        return {"batch_id": batch_id, "total": len(untrimmed), "status": "running"}
 
     @app.get("/api/labeling/summary")
     async def labeling_summary():

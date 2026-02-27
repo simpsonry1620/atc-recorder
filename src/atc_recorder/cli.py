@@ -2465,6 +2465,107 @@ def training_filter(ctx: click.Context, max_cer: float) -> None:
     console.print(f"[green]Accepted: {accepted}[/green]  [red]Rejected: {rejected}[/red]  (CER threshold: {max_cer})")
 
 
+@training.command("trim")
+@click.option("--whisper-host", envvar="WHISPER_GRPC_HOST", default="localhost")
+@click.option("--whisper-port", envvar="WHISPER_GRPC_PORT", type=int, default=50051)
+@click.option("--onset-pad", type=float, default=0.1, help="Seconds of padding before first word")
+@click.option("--offset-pad", type=float, default=0.1, help="Seconds of padding after last word")
+@click.option("--min-trimmed-duration", type=float, default=0.5, help="Skip if trimmed chunk would be shorter")
+@click.option("--status", "status_filter", type=click.Choice(["accepted", "verified", "pending"]), default=None, help="Only trim chunks with this status")
+@click.option("--feed", "feed_filter", default=None, help="Only trim chunks from this feed")
+@click.option("--max-chunks", type=int, default=0, help="Limit number of chunks to trim (0=all)")
+@click.option("--archive-dir", type=click.Path(path_type=Path), default=None, help="Directory for original WAV backups")
+@click.pass_context
+def training_trim(
+    ctx: click.Context,
+    whisper_host: str,
+    whisper_port: int,
+    onset_pad: float,
+    offset_pad: float,
+    min_trimmed_duration: float,
+    status_filter: Optional[str],
+    feed_filter: Optional[str],
+    max_chunks: int,
+    archive_dir: Optional[Path],
+) -> None:
+    """Trim labeled chunks to align audio with transcribed text.
+
+    Uses Whisper word-level timestamps to remove leading/trailing
+    dialog bleed from adjacent ATC transmissions. Original WAVs are
+    archived before modification.
+    """
+    if not TRANSCRIPTION_AVAILABLE:
+        console.print("[red]Transcription dependencies not installed[/red]")
+        sys.exit(1)
+
+    from .labeling import LabelStore
+    from .trimmer import trim_labeled_chunks
+
+    cfg = ctx.obj["config"]
+    tcfg = _get_training_config(cfg)
+    label_store = LabelStore(Path(tcfg.labels_db_path))
+    adir = archive_dir or Path(tcfg.chunks_dir).parent / "chunks_archive"
+
+    whisper_client = WhisperClient(grpc_host=whisper_host, grpc_port=whisper_port)
+
+    untrimmed = label_store.list_untrimmed_chunks(
+        status=status_filter, feed_id=feed_filter,
+    )
+    if max_chunks > 0:
+        untrimmed = untrimmed[:max_chunks]
+
+    if not untrimmed:
+        console.print("[yellow]No untrimmed chunks found[/yellow]")
+        return
+
+    console.print(f"[bold]Trimming {len(untrimmed)} chunks[/bold]")
+    console.print(f"  Whisper: {whisper_host}:{whisper_port}")
+    console.print(f"  Onset padding: {onset_pad}s")
+    console.print(f"  Offset padding: {offset_pad}s")
+    console.print(f"  Archive dir: {adir}")
+    console.print()
+
+    with Progress(
+        SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
+        BarColumn(), TaskProgressColumn(), console=console,
+    ) as progress:
+        task = progress.add_task("Trimming...", total=len(untrimmed))
+
+        def _on_progress(i, total, result):
+            desc = f"{Path(result.chunk_id[:8]).name}"
+            if result.success:
+                desc = f"Trimmed {result.original_duration:.1f}s -> {result.trimmed_duration:.1f}s"
+            elif result.skipped:
+                desc = f"Skipped: {result.skip_reason}"
+            elif result.error:
+                desc = f"Error: {result.error[:40]}"
+            progress.update(task, advance=1, description=desc)
+
+        batch = trim_labeled_chunks(
+            label_store,
+            whisper_client,
+            adir,
+            onset_pad=onset_pad,
+            offset_pad=offset_pad,
+            min_trimmed_duration=min_trimmed_duration,
+            status_filter=status_filter,
+            feed_filter=feed_filter,
+            max_chunks=max_chunks,
+            progress_callback=_on_progress,
+        )
+
+    table = Table(title="Trim Results")
+    table.add_column("Metric", style="bold")
+    table.add_column("Value", justify="right")
+    table.add_row("Total processed", str(batch.total))
+    table.add_row("Trimmed", f"[green]{batch.trimmed}[/green]")
+    table.add_row("Skipped", f"[yellow]{batch.skipped}[/yellow]")
+    table.add_row("Errors", f"[red]{batch.errors}[/red]")
+    table.add_row("Audio saved", f"{batch.total_saved_sec:.1f}s")
+    console.print()
+    console.print(table)
+
+
 @training.command("stats")
 @click.pass_context
 def training_stats(ctx: click.Context) -> None:

@@ -212,14 +212,64 @@ The web dashboard provides a UI for reviewing chunks:
 Verified and accepted chunks are exported for ASR fine-tuning manifest
 generation.
 
+### Post-Label Audio Trimming
+
+**Source code:** `src/atc_recorder/trimmer.py`
+
+After labeling, chunks often contain leading or trailing audio from
+adjacent ATC transmissions ("dialog bleed").  This occurs because:
+
+1. VAD boundary expansion adds 0.2 s per side
+2. Ambient padding adds 0.5 s per side during extraction
+3. Back-to-back transmissions on the shared radio channel may be merged
+
+The **trim step** uses Whisper word-level timestamps to re-cut each
+chunk's audio so it aligns precisely with the transcribed text.
+
+**Workflow:**
+
+1. Run Whisper on the labeled chunk to obtain word-level `start_time` /
+   `end_time` for each word.
+2. Set trim boundaries: `first_word_start − onset_pad` to
+   `last_word_end + offset_pad`.
+3. Archive the original WAV to `recordings/chunks_archive/`.
+4. Overwrite the chunk WAV with the trimmed audio.
+5. Record trim metadata in the label database.
+
+**Archiving:** Original WAVs are copied to `chunks_archive/` before
+modification, preserving the same `{feed_id}/{date}/` directory
+structure.  This makes trimming fully reversible.
+
+| Parameter             | CLI flag                 | Default | Description                           |
+|-----------------------|--------------------------|---------|---------------------------------------|
+| Onset padding         | `--onset-pad`            | 0.1 s   | Padding before first word             |
+| Offset padding        | `--offset-pad`           | 0.1 s   | Padding after last word               |
+| Min trimmed duration  | `--min-trimmed-duration` | 0.5 s   | Skip if result would be too short     |
+| Status filter         | `--status`               | all     | Only trim accepted/verified/pending   |
+| Feed filter           | `--feed`                 | all     | Only trim a specific feed             |
+
+**Database columns added to `labeled_chunks`:**
+
+| Column               | Type | Description                            |
+|----------------------|------|----------------------------------------|
+| `trim_start_sec`     | REAL | Trim start within original chunk       |
+| `trim_end_sec`       | REAL | Trim end within original chunk         |
+| `original_duration`  | REAL | Duration before trimming               |
+| `original_audio_path`| TEXT | Path to archived original WAV          |
+
+Already-trimmed chunks (`trim_start_sec IS NOT NULL`) are skipped on
+re-runs, making the process idempotent.
+
 ## Entry Points
 
 | Method    | Command / Endpoint                   | Description                   |
 |-----------|--------------------------------------|-------------------------------|
 | CLI       | `atc-recorder training chunk <dir>`  | Chunk files in a directory    |
 | CLI       | `atc-recorder training label`        | Label existing chunks         |
+| CLI       | `atc-recorder training trim`         | Trim chunks to transcript     |
 | Dashboard | `POST /api/labeling/start-chunking`  | Async chunking via web UI     |
 | Dashboard | `POST /api/labeling/start-labeling`  | Async labeling via web UI     |
+| Dashboard | `POST /api/labeling/start-trimming`  | Async trimming via web UI     |
 
 ## Design Notes
 
@@ -231,3 +281,5 @@ generation.
 - **Deterministic IDs** enable safe re-runs without duplicate data.
 - **SQLite storage** for both chunk metadata and labels keeps the system
   self-contained with no external database dependency.
+- **Reversible trimming** — original WAVs are archived before modification,
+  and trim metadata is tracked in the database.

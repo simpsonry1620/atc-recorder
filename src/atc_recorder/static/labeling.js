@@ -81,6 +81,11 @@
     if (btn) btn.disabled = false;
   }
 
+  function enableStepTrim() {
+    const btn = document.getElementById("lb-start-trim");
+    if (btn) btn.disabled = false;
+  }
+
   function enableStep3() {
     const btn = document.getElementById("lb-start-review");
     if (btn) btn.disabled = false;
@@ -97,6 +102,7 @@
         const selectors = [
           document.getElementById("lb-chunk-feed"),
           document.getElementById("lb-label-feed"),
+          document.getElementById("lb-trim-feed"),
           document.getElementById("lb-browse-feed"),
         ];
         selectors.forEach((sel) => {
@@ -117,6 +123,7 @@
       const s = await api("/api/labeling/summary");
       if (s.total > 0) {
         enableStep2();
+        enableStepTrim();
         enableStep3();
         return;
       }
@@ -699,6 +706,7 @@
           prog.classList.add("hidden");
           btn.textContent = "Re-run Labeling";
           btn.disabled = false;
+          enableStepTrim();
           enableStep3();
           loadLabelingSummary();
         });
@@ -709,7 +717,64 @@
       }
     });
 
-    // Step 3: Start Reviewing (switch to active UI)
+    // Step 3: Start Trimming
+    document.getElementById("lb-start-trim")?.addEventListener("click", async () => {
+      const btn = document.getElementById("lb-start-trim");
+      const prog = document.getElementById("lb-trim-progress");
+      const bar = document.getElementById("lb-trim-bar");
+      const status = document.getElementById("lb-trim-status");
+      const done = document.getElementById("lb-trim-done");
+      const trimFeed = document.getElementById("lb-trim-feed")?.value || "";
+      const onsetPad = parseFloat(document.getElementById("lb-trim-onset")?.value || "0.1");
+      const offsetPad = parseFloat(document.getElementById("lb-trim-offset")?.value || "0.1");
+      const trimMax = document.getElementById("lb-trim-max")?.value || "";
+
+      btn.disabled = true;
+      btn.textContent = "Trimming...";
+      prog.classList.remove("hidden");
+      done.classList.add("hidden");
+      bar.style.width = "0%";
+
+      const trimBody = { onset_pad: onsetPad, offset_pad: offsetPad };
+      if (trimFeed) trimBody.feed_id = trimFeed;
+      if (trimMax) trimBody.max_chunks = parseInt(trimMax, 10);
+
+      try {
+        const r = await api("/api/labeling/start-trimming", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(trimBody),
+        });
+
+        if (!r.batch_id) {
+          status.textContent = "No untrimmed chunks found";
+          btn.disabled = false;
+          btn.textContent = "Start Trimming";
+          return;
+        }
+
+        pollJob(r.batch_id, bar, status, (j) => {
+          const parts = [];
+          if (j.trimmed) parts.push(`${j.trimmed} trimmed`);
+          if (j.skipped) parts.push(`${j.skipped} skipped`);
+          if (j.failed > 0) parts.push(`${j.failed} failed`);
+          const saved = (j.total_saved_sec || 0).toFixed(1);
+          if (parseFloat(saved) > 0) parts.push(`${saved}s audio removed`);
+          done.textContent = "Done: " + parts.join(", ");
+          done.classList.remove("hidden");
+          prog.classList.add("hidden");
+          btn.textContent = "Re-run Trimming";
+          btn.disabled = false;
+          enableStep3();
+        });
+      } catch (e) {
+        status.textContent = "Error: " + e.message;
+        btn.disabled = false;
+        btn.textContent = "Start Trimming";
+      }
+    });
+
+    // Step 4: Start Reviewing (switch to active UI)
     document.getElementById("lb-start-review")?.addEventListener("click", () => {
       showActiveUI();
       loadLabelingSummary();

@@ -1,0 +1,13 @@
+---
+description: Prefer dashboard GUI over CLI for all new features
+alwaysApply: true
+---
+
+# GUI-First Development
+
+When building new features or commands for this project:
+
+1. **Always provide a dashboard UI** — every new operation must be accessible through the web dashboard (FastAPI + static HTML/JS).
+2. **CLI is optional** — skip CLI commands unless the user specifically requests them, or the feature is only useful in headless/scripted contexts.
+3. **Follow existing dashboard patterns** — batch operations use `_batch_jobs` dict, `pollJob()` in JS, progress bars, and the step-card layout in the labeling tab.
+4. **API endpoints go in `dashboard.py`** — new backend operations are exposed as `/api/...` endpoints, not just CLI subcommands.

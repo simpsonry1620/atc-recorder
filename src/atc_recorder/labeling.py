@@ -35,6 +35,10 @@ class LabeledChunk:
     verified_by: str
     created_at: str
     updated_at: str
+    trim_start_sec: Optional[float] = None
+    trim_end_sec: Optional[float] = None
+    original_duration: Optional[float] = None
+    original_audio_path: Optional[str] = None
 
 
 class LabelStore:
@@ -52,6 +56,13 @@ class LabelStore:
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
+
+    _TRIM_COLUMNS = [
+        ("trim_start_sec", "REAL"),
+        ("trim_end_sec", "REAL"),
+        ("original_duration", "REAL"),
+        ("original_audio_path", "TEXT"),
+    ]
 
     def _ensure_schema(self) -> None:
         with self._conn() as conn:
@@ -71,7 +82,11 @@ class LabelStore:
                     spoken_text     TEXT NOT NULL DEFAULT '',
                     verified_by     TEXT NOT NULL DEFAULT '',
                     created_at      TEXT NOT NULL,
-                    updated_at      TEXT NOT NULL
+                    updated_at      TEXT NOT NULL,
+                    trim_start_sec  REAL,
+                    trim_end_sec    REAL,
+                    original_duration REAL,
+                    original_audio_path TEXT
                 )
             """)
             conn.execute(
@@ -83,7 +98,19 @@ class LabelStore:
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_label_feed ON labeled_chunks(feed_id, date)"
             )
+            self._migrate_trim_columns(conn)
             conn.commit()
+
+    def _migrate_trim_columns(self, conn: sqlite3.Connection) -> None:
+        """Add trim columns to existing databases that lack them."""
+        existing = {
+            row[1] for row in conn.execute("PRAGMA table_info(labeled_chunks)").fetchall()
+        }
+        for col_name, col_type in self._TRIM_COLUMNS:
+            if col_name not in existing:
+                conn.execute(
+                    f"ALTER TABLE labeled_chunks ADD COLUMN {col_name} {col_type}"
+                )
 
     def _row_to_labeled(self, row: sqlite3.Row) -> LabeledChunk:
         return LabeledChunk(
@@ -102,6 +129,10 @@ class LabelStore:
             verified_by=row["verified_by"],
             created_at=row["created_at"],
             updated_at=row["updated_at"],
+            trim_start_sec=row["trim_start_sec"],
+            trim_end_sec=row["trim_end_sec"],
+            original_duration=row["original_duration"],
+            original_audio_path=row["original_audio_path"],
         )
 
     def save_label(
@@ -168,6 +199,54 @@ class LabelStore:
             conn.commit()
 
         return accepted, rejected
+
+    def update_trim(
+        self,
+        chunk_id: str,
+        trim_start_sec: float,
+        trim_end_sec: float,
+        original_duration: float,
+        original_audio_path: str,
+        new_duration: float,
+    ) -> bool:
+        """Record trim metadata and update duration for a chunk."""
+        now = datetime.now(timezone.utc).isoformat()
+        with self._conn() as conn:
+            cur = conn.execute(
+                """UPDATE labeled_chunks
+                   SET trim_start_sec = ?, trim_end_sec = ?,
+                       original_duration = ?, original_audio_path = ?,
+                       duration = ?, updated_at = ?
+                   WHERE chunk_id = ?""",
+                (trim_start_sec, trim_end_sec, original_duration,
+                 original_audio_path, new_duration, now, chunk_id),
+            )
+            conn.commit()
+            return cur.rowcount > 0
+
+    def list_untrimmed_chunks(
+        self,
+        status: Optional[str] = None,
+        feed_id: Optional[str] = None,
+        limit: int = 100000,
+    ) -> list[LabeledChunk]:
+        """Return labeled chunks that have not yet been trimmed."""
+        clauses = ["trim_start_sec IS NULL"]
+        params: list[object] = []
+        if status:
+            clauses.append("status = ?")
+            params.append(status)
+        if feed_id:
+            clauses.append("feed_id = ?")
+            params.append(feed_id)
+        where = " WHERE " + " AND ".join(clauses)
+        params.append(limit)
+        with self._conn() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM labeled_chunks{where} ORDER BY feed_id, date LIMIT ?",
+                params,
+            ).fetchall()
+        return [self._row_to_labeled(r) for r in rows]
 
     def update_status(
         self,
