@@ -279,11 +279,10 @@
     try {
       const s = await api("/api/labeling/summary");
 
-      if (s.total === 0) {
-        showEmptyGuide();
-        return;
+      if (s.total > 0) {
+        enableStepTrim();
+        enableStep3();
       }
-      showActiveUI();
 
       const cards = document.getElementById("lb-summary");
       if (!cards) return;
@@ -781,6 +780,12 @@
       loadLabelingChunks();
     });
 
+    // Back to pipeline step cards from review UI
+    document.getElementById("lb-back-pipeline")?.addEventListener("click", () => {
+      showEmptyGuide();
+      loadLabelingSummary();
+    });
+
     // Advanced chunking options toggle
     document.getElementById("lb-chunk-adv-toggle")?.addEventListener("click", () => {
       const adv = document.getElementById("lb-chunk-advanced");
@@ -813,8 +818,11 @@
       const labelPanel = document.getElementById("panel-labeling");
       if (labelPanel && !labelPanel.classList.contains("hidden")) {
         loadLabelingSummary();
-        loadLabelingChunks();
         loadDatasetStats();
+        const activeUI = document.getElementById("lb-active-ui");
+        if (activeUI && !activeUI.classList.contains("hidden")) {
+          loadLabelingChunks();
+        }
       }
       const trainPanel = document.getElementById("panel-training");
       if (trainPanel && !trainPanel.classList.contains("hidden")) {
