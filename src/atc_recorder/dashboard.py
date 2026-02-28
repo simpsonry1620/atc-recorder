@@ -1940,22 +1940,13 @@ def create_app(config: Config) -> FastAPI:
 
     @app.post("/api/labeling/start-trimming")
     async def labeling_start_trimming(request: Request):
-        """Trim labeled chunks to align audio with transcribed text."""
+        """Trim labeled chunks using VAD to find tight speech boundaries."""
         body = await request.json()
-        whisper_host = body.get("whisper_host", os.environ.get("WHISPER_GRPC_HOST", "whisper-asr"))
-        whisper_port = int(body.get("whisper_port", os.environ.get("WHISPER_GRPC_PORT", "50051")))
         onset_pad = float(body.get("onset_pad", 0.1))
         offset_pad = float(body.get("offset_pad", 0.1))
         status_filter = body.get("status") or None
         feed_filter = body.get("feed_id") or None
         max_chunks = int(body.get("max_chunks", 0))
-
-        try:
-            from .transcribe import WhisperClient, RIVA_AVAILABLE
-        except ImportError:
-            raise HTTPException(503, "Transcription dependencies not available")
-        if not RIVA_AVAILABLE:
-            raise HTTPException(503, "ASR client dependency missing (nvidia-riva-client)")
 
         tcfg = _get_training_cfg()
         label_store = _get_label_store()
@@ -1989,7 +1980,6 @@ def create_app(config: Config) -> FastAPI:
             from .trimmer import trim_chunk
 
             job = _batch_jobs[batch_id]
-            w_client = WhisperClient(grpc_host=whisper_host, grpc_port=whisper_port)
             ls = _get_label_store()
 
             for i, chunk in enumerate(untrimmed):
@@ -2000,7 +1990,7 @@ def create_app(config: Config) -> FastAPI:
                 job["current_index"] = i
                 try:
                     result = trim_chunk(
-                        chunk, w_client, ls, archive_dir,
+                        chunk, ls, archive_dir,
                         onset_pad=onset_pad, offset_pad=offset_pad,
                     )
                     if result.success:

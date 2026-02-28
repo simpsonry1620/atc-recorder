@@ -1,8 +1,11 @@
-"""Post-label audio trimming using ASR word-level timestamps.
+"""Post-label audio trimming via VAD-based speech boundary detection.
 
-Trims labeled chunk WAVs so audio aligns precisely with the transcribed
-text, removing leading/trailing dialog bleed from adjacent transmissions.
+Trims labeled chunk WAVs so audio aligns precisely with detected speech,
+removing leading/trailing dialog bleed from adjacent transmissions.
 Original files are archived before modification.
+
+Uses energy-based VAD directly on each chunk (no ASR network call needed)
+to find the first and last speech boundaries, then trims to those bounds.
 
 See: https://github.com/simpsonry1620/atc-recorder/issues/13
 """
@@ -13,7 +16,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from .chunker import SAMPLE_RATE, SAMPLE_WIDTH, _read_wav_samples, _write_wav
+from .chunker import (
+    SAMPLE_RATE,
+    SAMPLE_WIDTH,
+    _read_wav_samples,
+    _write_wav,
+    detect_speech_segments,
+)
 from .labeling import LabelStore, LabeledChunk
 from .logging import get_logger
 
@@ -36,44 +45,29 @@ class TrimResult:
     skip_reason: str = ""
 
 
-def _get_word_timestamps(
-    audio_path: Path,
-    whisper_client,
+def _detect_speech_bounds(
+    wav_path: Path,
+    energy_threshold: float = 300.0,
 ) -> Optional[tuple[float, float]]:
-    """Run a quick Whisper pass to get first/last word timestamps.
+    """Run energy-based VAD on a chunk to find speech start/end.
 
-    Returns (first_word_start, last_word_end) in seconds relative to the
-    audio file, or None if word timestamps are unavailable.
+    Uses a lower energy threshold than chunking since the audio is
+    already a speech-containing chunk — we just need to find the
+    tight boundaries within it.
+
+    Returns (speech_start, speech_end) in seconds, or None if no
+    speech segments are found.
     """
-    result = whisper_client.transcribe_file(audio_path)
-    if not result.success or not result.segments:
+    segments = detect_speech_segments(
+        wav_path,
+        energy_threshold=energy_threshold,
+        min_silence_sec=0.15,
+        merge_gap_sec=0.2,
+    )
+    if not segments:
         return None
 
-    first_start: Optional[float] = None
-    last_end: Optional[float] = None
-
-    for seg in result.segments:
-        words = seg.get("words", [])
-        if not words:
-            if "start_time" in seg and "end_time" in seg:
-                st = seg["start_time"]
-                et = seg["end_time"]
-                if first_start is None or st < first_start:
-                    first_start = st
-                if last_end is None or et > last_end:
-                    last_end = et
-            continue
-        for w in words:
-            st = w["start_time"]
-            et = w["end_time"]
-            if first_start is None or st < first_start:
-                first_start = st
-            if last_end is None or et > last_end:
-                last_end = et
-
-    if first_start is None or last_end is None:
-        return None
-    return (first_start, last_end)
+    return (segments[0][0], segments[-1][1])
 
 
 def _trim_wav(
@@ -101,18 +95,18 @@ def _trim_wav(
 
 def trim_chunk(
     chunk: LabeledChunk,
-    whisper_client,
     label_store: LabelStore,
     archive_dir: Path,
     *,
     onset_pad: float = 0.1,
     offset_pad: float = 0.1,
     min_trimmed_duration: float = 0.5,
+    energy_threshold: float = 300.0,
 ) -> TrimResult:
-    """Trim a single labeled chunk using Whisper word timestamps.
+    """Trim a single labeled chunk using VAD speech boundaries.
 
     Steps:
-      1. Get word-level timestamps from Whisper
+      1. Run energy-based VAD on the chunk to find speech bounds
       2. Calculate trim boundaries with padding
       3. Archive the original WAV
       4. Write trimmed WAV to original path
@@ -139,14 +133,15 @@ def trim_chunk(
 
     result.original_duration = original_duration
 
-    timestamps = _get_word_timestamps(audio_path, whisper_client)
-    if timestamps is None:
-        result.error = "no word timestamps returned by Whisper"
+    bounds = _detect_speech_bounds(audio_path, energy_threshold=energy_threshold)
+    if bounds is None:
+        result.skipped = True
+        result.skip_reason = "no speech detected by VAD"
         return result
 
-    first_word_start, last_word_end = timestamps
-    trim_start = max(0.0, first_word_start - onset_pad)
-    trim_end = min(original_duration, last_word_end + offset_pad)
+    speech_start, speech_end = bounds
+    trim_start = max(0.0, speech_start - onset_pad)
+    trim_end = min(original_duration, speech_end + offset_pad)
 
     if (trim_end - trim_start) < min_trimmed_duration:
         result.skipped = True
@@ -176,7 +171,6 @@ def trim_chunk(
     try:
         trimmed_duration = _trim_wav(audio_path, audio_path, trim_start, trim_end)
     except Exception as exc:
-        # Restore from archive on failure
         shutil.copy2(archive_path, audio_path)
         result.error = f"trim failed: {exc}"
         return result
@@ -221,12 +215,12 @@ class TrimBatchResult:
 
 def trim_labeled_chunks(
     label_store: LabelStore,
-    whisper_client,
     archive_dir: Path,
     *,
     onset_pad: float = 0.1,
     offset_pad: float = 0.1,
     min_trimmed_duration: float = 0.5,
+    energy_threshold: float = 300.0,
     status_filter: Optional[str] = None,
     feed_filter: Optional[str] = None,
     max_chunks: int = 0,
@@ -237,11 +231,11 @@ def trim_labeled_chunks(
 
     Args:
         label_store: Label database
-        whisper_client: WhisperClient for word timestamps
         archive_dir: Where to store original WAVs
         onset_pad: Seconds of padding before first word
         offset_pad: Seconds of padding after last word
         min_trimmed_duration: Skip chunks that would be shorter than this
+        energy_threshold: RMS energy threshold for VAD speech detection
         status_filter: Only trim chunks with this status (e.g. "accepted")
         feed_filter: Only trim chunks from this feed
         max_chunks: Limit number of chunks to process (0=all)
@@ -262,12 +256,12 @@ def trim_labeled_chunks(
     for i, chunk in enumerate(chunks):
         result = trim_chunk(
             chunk,
-            whisper_client,
             label_store,
             archive_dir,
             onset_pad=onset_pad,
             offset_pad=offset_pad,
             min_trimmed_duration=min_trimmed_duration,
+            energy_threshold=energy_threshold,
         )
 
         if result.success:

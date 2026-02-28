@@ -2466,10 +2466,8 @@ def training_filter(ctx: click.Context, max_cer: float) -> None:
 
 
 @training.command("trim")
-@click.option("--whisper-host", envvar="WHISPER_GRPC_HOST", default="localhost")
-@click.option("--whisper-port", envvar="WHISPER_GRPC_PORT", type=int, default=50051)
-@click.option("--onset-pad", type=float, default=0.1, help="Seconds of padding before first word")
-@click.option("--offset-pad", type=float, default=0.1, help="Seconds of padding after last word")
+@click.option("--onset-pad", type=float, default=0.1, help="Seconds of padding before first speech")
+@click.option("--offset-pad", type=float, default=0.1, help="Seconds of padding after last speech")
 @click.option("--min-trimmed-duration", type=float, default=0.5, help="Skip if trimmed chunk would be shorter")
 @click.option("--status", "status_filter", type=click.Choice(["accepted", "verified", "pending"]), default=None, help="Only trim chunks with this status")
 @click.option("--feed", "feed_filter", default=None, help="Only trim chunks from this feed")
@@ -2478,8 +2476,6 @@ def training_filter(ctx: click.Context, max_cer: float) -> None:
 @click.pass_context
 def training_trim(
     ctx: click.Context,
-    whisper_host: str,
-    whisper_port: int,
     onset_pad: float,
     offset_pad: float,
     min_trimmed_duration: float,
@@ -2488,16 +2484,12 @@ def training_trim(
     max_chunks: int,
     archive_dir: Optional[Path],
 ) -> None:
-    """Trim labeled chunks to align audio with transcribed text.
+    """Trim labeled chunks to align audio with detected speech.
 
-    Uses Whisper word-level timestamps to remove leading/trailing
-    dialog bleed from adjacent ATC transmissions. Original WAVs are
-    archived before modification.
+    Uses energy-based VAD to find tight speech boundaries within each
+    chunk, removing leading/trailing dialog bleed from adjacent ATC
+    transmissions. Original WAVs are archived before modification.
     """
-    if not TRANSCRIPTION_AVAILABLE:
-        console.print("[red]Transcription dependencies not installed[/red]")
-        sys.exit(1)
-
     from .labeling import LabelStore
     from .trimmer import trim_labeled_chunks
 
@@ -2505,8 +2497,6 @@ def training_trim(
     tcfg = _get_training_config(cfg)
     label_store = LabelStore(Path(tcfg.labels_db_path))
     adir = archive_dir or Path(tcfg.chunks_dir).parent / "chunks_archive"
-
-    whisper_client = WhisperClient(grpc_host=whisper_host, grpc_port=whisper_port)
 
     untrimmed = label_store.list_untrimmed_chunks(
         status=status_filter, feed_id=feed_filter,
@@ -2519,7 +2509,6 @@ def training_trim(
         return
 
     console.print(f"[bold]Trimming {len(untrimmed)} chunks[/bold]")
-    console.print(f"  Whisper: {whisper_host}:{whisper_port}")
     console.print(f"  Onset padding: {onset_pad}s")
     console.print(f"  Offset padding: {offset_pad}s")
     console.print(f"  Archive dir: {adir}")
@@ -2543,7 +2532,6 @@ def training_trim(
 
         batch = trim_labeled_chunks(
             label_store,
-            whisper_client,
             adir,
             onset_pad=onset_pad,
             offset_pad=offset_pad,
