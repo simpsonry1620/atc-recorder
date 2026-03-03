@@ -379,7 +379,7 @@
       const reviewEl = document.getElementById("lb-review");
       reviewEl.classList.remove("hidden");
       reviewEl.scrollIntoView({ behavior: "smooth", block: "start" });
-      document.getElementById("lb-audio").src = `/api/labeling/audio/${chunkId}`;
+      document.getElementById("lb-audio").src = `/api/labeling/audio/${chunkId}?t=${Date.now()}`;
       document.getElementById("lb-whisper-text").textContent = c.whisper_text;
       document.getElementById("lb-parakeet-text").textContent = c.parakeet_text;
       document.getElementById("lb-verified-text").value =
@@ -408,7 +408,7 @@
 
     if (toggle.checked) {
       if (statusEl) statusEl.textContent = "(loading...)";
-      audio.src = `/api/labeling/audio/${currentReviewChunkId}?denoise=true`;
+      audio.src = `/api/labeling/audio/${currentReviewChunkId}?denoise=true&t=${Date.now()}`;
       audio.addEventListener("canplay", function onReady() {
         audio.removeEventListener("canplay", onReady);
         if (statusEl) statusEl.textContent = "";
@@ -419,10 +419,10 @@
         audio.removeEventListener("error", onErr);
         if (statusEl) statusEl.textContent = "(denoise unavailable)";
         toggle.checked = false;
-        audio.src = `/api/labeling/audio/${currentReviewChunkId}`;
+        audio.src = `/api/labeling/audio/${currentReviewChunkId}?t=${Date.now()}`;
       }, { once: true });
     } else {
-      audio.src = `/api/labeling/audio/${currentReviewChunkId}`;
+      audio.src = `/api/labeling/audio/${currentReviewChunkId}?t=${Date.now()}`;
       if (statusEl) statusEl.textContent = "";
       audio.addEventListener("canplay", function onReady() {
         audio.removeEventListener("canplay", onReady);
@@ -537,6 +537,8 @@
         destroyWaveform();
         const panel = document.getElementById("lb-manual-trim-panel");
         if (panel) panel.classList.add("hidden");
+        const audioEl = document.getElementById("lb-audio");
+        if (audioEl) audioEl.src = `/api/labeling/audio/${currentReviewChunkId}?t=${Date.now()}`;
         loadLabelingSummary();
         loadLabelingChunks();
       } else {
