@@ -5,6 +5,7 @@
 
   let currentReviewChunkId = null;
   let currentReviewChunk = null;
+  let visibleChunkIds = [];
   let perfRuns = [];
   let browseOffset = 0;
   let wsInstance = null;
@@ -355,10 +356,11 @@
         )
         .join("");
 
-      tbody.querySelectorAll(".lb-review-btn").forEach((btn) => {
-        btn.addEventListener("click", (e) => {
-          e.stopPropagation();
-          openReview(btn.dataset.id);
+      visibleChunkIds = chunks.map((c) => c.chunk_id);
+
+      tbody.querySelectorAll("tr[data-chunk-id]").forEach((row) => {
+        row.addEventListener("click", () => {
+          openReview(row.dataset.chunkId, true);
         });
       });
     } catch (e) {
@@ -366,7 +368,7 @@
     }
   }
 
-  async function openReview(chunkId) {
+  async function openReview(chunkId, autoplay) {
     try {
       const c = await api(`/api/labeling/chunk/${chunkId}`);
       currentReviewChunkId = chunkId;
@@ -379,13 +381,24 @@
       const reviewEl = document.getElementById("lb-review");
       reviewEl.classList.remove("hidden");
       reviewEl.scrollIntoView({ behavior: "smooth", block: "start" });
-      document.getElementById("lb-audio").src = `/api/labeling/audio/${chunkId}?t=${Date.now()}`;
+
+      const audioEl = document.getElementById("lb-audio");
+      audioEl.src = `/api/labeling/audio/${chunkId}?t=${Date.now()}`;
+      if (autoplay) {
+        audioEl.addEventListener("canplay", function onReady() {
+          audioEl.removeEventListener("canplay", onReady);
+          audioEl.play();
+        }, { once: true });
+      }
+
       document.getElementById("lb-whisper-text").textContent = c.whisper_text;
       document.getElementById("lb-parakeet-text").textContent = c.parakeet_text;
       document.getElementById("lb-verified-text").value =
         c.verified_text || c.consensus_text || c.whisper_text;
       document.getElementById("lb-review-id").textContent =
         `${chunkId} | CER: ${(c.cer * 100).toFixed(1)}% | ${c.status}`;
+
+      highlightActiveRow(chunkId);
 
       const toggle = document.getElementById("lb-denoise-toggle");
       const statusEl = document.getElementById("lb-denoise-status");
@@ -394,6 +407,25 @@
     } catch (e) {
       console.warn("open review:", e);
     }
+  }
+
+  function highlightActiveRow(chunkId) {
+    const tbody = document.getElementById("lb-tbody");
+    if (!tbody) return;
+    tbody.querySelectorAll("tr[data-chunk-id]").forEach((row) => {
+      if (row.dataset.chunkId === chunkId) {
+        row.classList.add("bg-brand-900/30");
+      } else {
+        row.classList.remove("bg-brand-900/30");
+      }
+    });
+  }
+
+  function getNextChunkId() {
+    if (!currentReviewChunkId || visibleChunkIds.length === 0) return null;
+    const idx = visibleChunkIds.indexOf(currentReviewChunkId);
+    if (idx === -1 || idx >= visibleChunkIds.length - 1) return null;
+    return visibleChunkIds[idx + 1];
   }
 
   async function toggleDenoise() {
@@ -557,8 +589,9 @@
     if (panel) panel.classList.add("hidden");
   }
 
-  async function updateChunkStatus(status) {
+  async function updateChunkStatus(status, skipAdvance) {
     if (!currentReviewChunkId) return;
+    const nextId = skipAdvance ? null : getNextChunkId();
     const verifiedText = document.getElementById("lb-verified-text")?.value || "";
     try {
       await api(`/api/labeling/chunk/${currentReviewChunkId}`, {
@@ -568,6 +601,9 @@
       });
       loadLabelingSummary();
       loadLabelingChunks();
+      if (nextId) {
+        openReview(nextId, true);
+      }
     } catch (e) {
       console.warn("update status:", e);
     }
@@ -616,7 +652,7 @@
     document.getElementById("lb-accept-btn")?.addEventListener("click", () => updateChunkStatus("accepted"));
     document.getElementById("lb-reject-btn")?.addEventListener("click", () => updateChunkStatus("rejected"));
     document.getElementById("lb-retrim-btn")?.addEventListener("click", () => {
-      updateChunkStatus("needs_retrim");
+      updateChunkStatus("needs_retrim", true);
       openManualTrimPanel();
     });
     document.getElementById("lb-denoise-toggle")?.addEventListener("change", toggleDenoise);
@@ -701,7 +737,7 @@
       else if (e.key === "r") updateChunkStatus("rejected");
       else if (e.key === "v") updateChunkStatus("verified");
       else if (e.key === "t") {
-        updateChunkStatus("needs_retrim");
+        updateChunkStatus("needs_retrim", true);
         openManualTrimPanel();
       }
       else if (e.key === " ") {
