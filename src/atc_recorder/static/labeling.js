@@ -4,8 +4,12 @@
   "use strict";
 
   let currentReviewChunkId = null;
+  let currentReviewChunk = null;
   let perfRuns = [];
   let browseOffset = 0;
+  let wsInstance = null;
+  let wsRegions = null;
+  let trimRegion = null;
 
   // --- helpers ---
   async function api(url, opts) {
@@ -26,6 +30,7 @@
       accepted: "bg-green-900/50 text-green-400",
       rejected: "bg-red-900/50 text-red-400",
       verified: "bg-cyan-900/50 text-cyan-400",
+      needs_retrim: "bg-amber-900/50 text-amber-400",
     };
     const cls = colors[status] || "bg-gray-700 text-gray-300";
     return `<span class="px-2 py-0.5 rounded text-xs ${cls}">${status}</span>`;
@@ -286,13 +291,17 @@
 
       const cards = document.getElementById("lb-summary");
       if (!cards) return;
-      cards.innerHTML = [
+      const items = [
         { label: "Total", value: s.total, cls: "" },
         { label: "Pending", value: s.pending, cls: "text-gray-400" },
         { label: "Accepted", value: s.accepted, cls: "text-green-400" },
         { label: "Rejected", value: s.rejected, cls: "text-red-400" },
         { label: "Verified", value: s.verified, cls: "text-cyan-400" },
-      ]
+      ];
+      if (s.needs_retrim > 0) {
+        items.push({ label: "Needs Retrim", value: s.needs_retrim, cls: "text-amber-400" });
+      }
+      cards.innerHTML = items
         .map(
           (c) => `
         <div class="stat-card">
@@ -361,6 +370,11 @@
     try {
       const c = await api(`/api/labeling/chunk/${chunkId}`);
       currentReviewChunkId = chunkId;
+      currentReviewChunk = c;
+
+      destroyWaveform();
+      const trimPanel = document.getElementById("lb-manual-trim-panel");
+      if (trimPanel) trimPanel.classList.add("hidden");
 
       const reviewEl = document.getElementById("lb-review");
       reviewEl.classList.remove("hidden");
@@ -417,6 +431,128 @@
       }, { once: true });
     }
     audio.load();
+  }
+
+  function destroyWaveform() {
+    if (wsInstance) {
+      wsInstance.destroy();
+      wsInstance = null;
+      wsRegions = null;
+      trimRegion = null;
+    }
+  }
+
+  function initWaveform(audioUrl, existingStart, existingEnd) {
+    destroyWaveform();
+
+    if (!window.WaveSurfer || !window.WaveSurferRegions) {
+      console.warn("WaveSurfer not loaded yet");
+      return;
+    }
+
+    wsRegions = window.WaveSurferRegions.create();
+    wsInstance = window.WaveSurfer.create({
+      container: "#lb-waveform",
+      waveColor: "#6366f1",
+      progressColor: "#818cf8",
+      cursorColor: "#c7d2fe",
+      url: audioUrl,
+      height: 96,
+      barWidth: 2,
+      barGap: 1,
+      barRadius: 2,
+      plugins: [wsRegions],
+    });
+
+    wsInstance.on("ready", () => {
+      const duration = wsInstance.getDuration();
+      const rStart = existingStart != null ? existingStart : 0;
+      const rEnd = existingEnd != null ? existingEnd : duration;
+
+      trimRegion = wsRegions.addRegion({
+        start: rStart,
+        end: rEnd,
+        color: "rgba(99, 102, 241, 0.2)",
+        drag: false,
+        resize: true,
+      });
+
+      updateTrimReadouts(rStart, rEnd);
+    });
+
+    wsRegions.on("region-updated", (region) => {
+      updateTrimReadouts(region.start, region.end);
+    });
+  }
+
+  function updateTrimReadouts(start, end) {
+    const startEl = document.getElementById("lb-mtrim-start");
+    const endEl = document.getElementById("lb-mtrim-end");
+    const durEl = document.getElementById("lb-mtrim-dur");
+    if (startEl) startEl.textContent = start.toFixed(2);
+    if (endEl) endEl.textContent = end.toFixed(2);
+    if (durEl) durEl.textContent = (end - start).toFixed(2);
+  }
+
+  function openManualTrimPanel() {
+    if (!currentReviewChunkId) return;
+
+    const panel = document.getElementById("lb-manual-trim-panel");
+    const chunkLabel = document.getElementById("lb-trim-chunk-id");
+    const statusEl = document.getElementById("lb-mtrim-status");
+    if (panel) panel.classList.remove("hidden");
+    if (chunkLabel) chunkLabel.textContent = currentReviewChunkId;
+    if (statusEl) statusEl.textContent = "";
+
+    const audioUrl = `/api/labeling/audio/${currentReviewChunkId}?original=true`;
+    const c = currentReviewChunk;
+    const existingStart = c?.trim_start_sec ?? null;
+    const existingEnd = c?.trim_end_sec ?? null;
+
+    initWaveform(audioUrl, existingStart, existingEnd);
+
+    panel.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
+
+  async function applyManualTrim() {
+    if (!currentReviewChunkId || !trimRegion) return;
+
+    const statusEl = document.getElementById("lb-mtrim-status");
+    const applyBtn = document.getElementById("lb-mtrim-apply");
+    if (applyBtn) applyBtn.disabled = true;
+    if (statusEl) statusEl.textContent = "Applying...";
+
+    try {
+      const r = await api(`/api/labeling/manual-trim/${currentReviewChunkId}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          trim_start: trimRegion.start,
+          trim_end: trimRegion.end,
+        }),
+      });
+
+      if (r.success) {
+        if (statusEl) statusEl.textContent = `Trimmed to ${r.trimmed_duration.toFixed(2)}s`;
+        destroyWaveform();
+        const panel = document.getElementById("lb-manual-trim-panel");
+        if (panel) panel.classList.add("hidden");
+        loadLabelingSummary();
+        loadLabelingChunks();
+      } else {
+        if (statusEl) statusEl.textContent = `Error: ${r.error}`;
+      }
+    } catch (e) {
+      if (statusEl) statusEl.textContent = `Error: ${e.message}`;
+    } finally {
+      if (applyBtn) applyBtn.disabled = false;
+    }
+  }
+
+  function cancelManualTrim() {
+    destroyWaveform();
+    const panel = document.getElementById("lb-manual-trim-panel");
+    if (panel) panel.classList.add("hidden");
   }
 
   async function updateChunkStatus(status) {
@@ -477,7 +613,17 @@
     document.getElementById("lb-verify-btn")?.addEventListener("click", () => updateChunkStatus("verified"));
     document.getElementById("lb-accept-btn")?.addEventListener("click", () => updateChunkStatus("accepted"));
     document.getElementById("lb-reject-btn")?.addEventListener("click", () => updateChunkStatus("rejected"));
+    document.getElementById("lb-retrim-btn")?.addEventListener("click", () => {
+      updateChunkStatus("needs_retrim");
+      openManualTrimPanel();
+    });
     document.getElementById("lb-denoise-toggle")?.addEventListener("change", toggleDenoise);
+
+    document.getElementById("lb-mtrim-preview")?.addEventListener("click", () => {
+      if (trimRegion) trimRegion.play();
+    });
+    document.getElementById("lb-mtrim-apply")?.addEventListener("click", applyManualTrim);
+    document.getElementById("lb-mtrim-cancel")?.addEventListener("click", cancelManualTrim);
 
     document.getElementById("lb-accept-all")?.addEventListener("click", async () => {
       try {
@@ -552,6 +698,10 @@
       if (e.key === "a") updateChunkStatus("accepted");
       else if (e.key === "r") updateChunkStatus("rejected");
       else if (e.key === "v") updateChunkStatus("verified");
+      else if (e.key === "t") {
+        updateChunkStatus("needs_retrim");
+        openManualTrimPanel();
+      }
       else if (e.key === " ") {
         e.preventDefault();
         const audio = document.getElementById("lb-audio");

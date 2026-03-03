@@ -201,6 +201,96 @@ def trim_chunk(
     return result
 
 
+def trim_chunk_manual(
+    chunk: LabeledChunk,
+    label_store: LabelStore,
+    archive_dir: Path,
+    trim_start: float,
+    trim_end: float,
+    min_trimmed_duration: float = 0.3,
+) -> TrimResult:
+    """Trim a chunk using user-specified boundaries (no VAD).
+
+    If the chunk was previously trimmed, reads from the archived original
+    so the user always sets boundaries against the full audio.
+    """
+    result = TrimResult(chunk_id=chunk.chunk_id)
+
+    source_path = Path(chunk.original_audio_path) if chunk.original_audio_path else Path(chunk.audio_path)
+    audio_path = Path(chunk.audio_path)
+
+    if not source_path.exists():
+        result.error = f"source audio not found: {source_path}"
+        return result
+
+    try:
+        with wave.open(str(source_path), "rb") as wf:
+            original_duration = wf.getnframes() / wf.getframerate()
+    except Exception as exc:
+        result.error = f"cannot read WAV: {exc}"
+        return result
+
+    result.original_duration = original_duration
+
+    trim_start = max(0.0, trim_start)
+    trim_end = min(original_duration, trim_end)
+
+    if (trim_end - trim_start) < min_trimmed_duration:
+        result.error = (
+            f"trimmed duration {trim_end - trim_start:.2f}s "
+            f"below minimum {min_trimmed_duration}s"
+        )
+        return result
+
+    if trim_start >= trim_end:
+        result.error = "trim_start must be less than trim_end"
+        return result
+
+    archive_path = archive_dir / audio_path.parent.name / audio_path.name
+    if chunk.feed_id and chunk.date:
+        archive_path = archive_dir / chunk.feed_id / chunk.date / audio_path.name
+
+    if not chunk.original_audio_path:
+        try:
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(audio_path, archive_path)
+        except Exception as exc:
+            result.error = f"archiving failed: {exc}"
+            return result
+
+    try:
+        trimmed_duration = _trim_wav(source_path, audio_path, trim_start, trim_end)
+    except Exception as exc:
+        result.error = f"trim failed: {exc}"
+        return result
+
+    actual_archive = chunk.original_audio_path or str(archive_path)
+    label_store.update_trim(
+        chunk_id=chunk.chunk_id,
+        trim_start_sec=round(trim_start, 4),
+        trim_end_sec=round(trim_end, 4),
+        original_duration=round(original_duration, 4),
+        original_audio_path=actual_archive,
+        new_duration=round(trimmed_duration, 4),
+    )
+
+    result.success = True
+    result.trim_start_sec = trim_start
+    result.trim_end_sec = trim_end
+    result.trimmed_duration = trimmed_duration
+    result.archived_path = actual_archive
+
+    logger.info(
+        "Manual trim %s: %.2fs -> %.2fs [%.2f - %.2f]",
+        audio_path.name,
+        original_duration,
+        trimmed_duration,
+        trim_start,
+        trim_end,
+    )
+    return result
+
+
 @dataclass
 class TrimBatchResult:
     """Summary of a batch trim operation."""

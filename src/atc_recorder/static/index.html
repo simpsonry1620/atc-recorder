@@ -520,7 +520,7 @@
                   <span class="flex items-center justify-center w-7 h-7 rounded-full bg-brand-900/50 text-brand-400 text-sm font-bold shrink-0">3</span>
                   <h3 class="text-sm font-semibold text-gray-200">Trim to Transcript</h3>
                 </div>
-                <p class="text-xs text-gray-500 mb-4">Remove leading/trailing dialog bleed by trimming audio to match Whisper word timestamps. Originals are archived.</p>
+                <p class="text-xs text-gray-500 mb-4">Remove leading/trailing dialog bleed using VAD speech detection. Originals are archived.</p>
                 <div class="mb-2">
                   <label class="text-xs text-gray-400 mb-1 block">Feed (optional)</label>
                   <select id="lb-trim-feed" class="input w-full text-xs h-8">
@@ -563,6 +563,7 @@
                   <span><kbd class="px-1.5 py-0.5 bg-gray-800 rounded text-gray-400 border border-gray-700">A</kbd> accept</span>
                   <span><kbd class="px-1.5 py-0.5 bg-gray-800 rounded text-gray-400 border border-gray-700">R</kbd> reject</span>
                   <span><kbd class="px-1.5 py-0.5 bg-gray-800 rounded text-gray-400 border border-gray-700">V</kbd> verify</span>
+                  <span><kbd class="px-1.5 py-0.5 bg-gray-800 rounded text-gray-400 border border-gray-700">T</kbd> retrim</span>
                 </div>
                 <div class="mt-auto">
                   <button id="lb-start-review" class="btn-primary w-full h-9 text-sm" disabled>Start Reviewing</button>
@@ -645,6 +646,7 @@
                 <option value="accepted">Accepted</option>
                 <option value="rejected">Rejected</option>
                 <option value="verified">Verified</option>
+                <option value="needs_retrim">Needs Retrim</option>
               </select>
             </div>
             <div>
@@ -710,7 +712,28 @@
               <button id="lb-verify-btn" class="btn-primary h-9">Verify</button>
               <button id="lb-accept-btn" class="btn-primary h-9">Accept</button>
               <button id="lb-reject-btn" class="btn-secondary h-9 text-red-400">Reject</button>
+              <button id="lb-retrim-btn" class="btn-secondary h-9 text-amber-400">Needs Retrim</button>
               <span id="lb-review-id" class="ml-auto text-xs text-gray-500"></span>
+            </div>
+          </div>
+
+          <!-- Manual Trim Panel -->
+          <div id="lb-manual-trim-panel" class="hidden mt-6 card">
+            <div class="flex items-center justify-between mb-3">
+              <h3 class="card-title">Manual Trim</h3>
+              <span id="lb-trim-chunk-id" class="text-xs text-gray-500"></span>
+            </div>
+            <div id="lb-waveform" class="w-full rounded-lg bg-gray-800 mb-3" style="min-height:96px"></div>
+            <div class="flex items-center gap-4 mb-3 text-xs text-gray-400">
+              <span>Start: <strong id="lb-mtrim-start" class="text-gray-200">0.00</strong>s</span>
+              <span>End: <strong id="lb-mtrim-end" class="text-gray-200">--</strong>s</span>
+              <span>Duration: <strong id="lb-mtrim-dur" class="text-gray-200">--</strong>s</span>
+            </div>
+            <div class="flex gap-2">
+              <button id="lb-mtrim-preview" class="btn-secondary h-9 text-sm">Preview Selection</button>
+              <button id="lb-mtrim-apply" class="btn-primary h-9 text-sm">Apply Trim</button>
+              <button id="lb-mtrim-cancel" class="btn-secondary h-9 text-sm">Cancel</button>
+              <span id="lb-mtrim-status" class="ml-auto text-xs text-gray-500"></span>
             </div>
           </div>
         </div>
@@ -768,6 +791,12 @@
   </div>
 
   <script src="https://unpkg.com/litegraph.js@0.7.18/build/litegraph.min.js"></script>
+  <script type="module">
+    import WaveSurfer from 'https://unpkg.com/wavesurfer.js@7/dist/wavesurfer.esm.js';
+    import RegionsPlugin from 'https://unpkg.com/wavesurfer.js@7/dist/plugins/regions.esm.js';
+    window.WaveSurfer = WaveSurfer;
+    window.WaveSurferRegions = RegionsPlugin;
+  </script>
   <script src="/static/app.js"></script>
   <script src="/static/workflow.js"></script>
   <script src="/static/labeling.js"></script>
