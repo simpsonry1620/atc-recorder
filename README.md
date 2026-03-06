@@ -1,6 +1,6 @@
 # ATC Recorder
 
-Record and download Air Traffic Control (ATC) audio from LiveATC.net for later transcription.
+Record and download Air Traffic Control (ATC) audio from LiveATC.net, transcribe it with NVIDIA ASR services, and work with the results through a dashboard-first workflow for search, analysis, labeling, trimming, and training-data export.
 
 ## Features
 
@@ -8,8 +8,12 @@ Record and download Air Traffic Control (ATC) audio from LiveATC.net for later t
 - **Archive Download**: Download historical recordings from LiveATC archives
 - **Feed Discovery**: Automatically discover available feeds for any airport
 - **Organized Output**: Files organized by feed and date with metadata
-- **Speech-to-Text**: Automatic transcription using NVIDIA Whisper ASR (GPU required)
-- **GUI ASR Trigger**: Run ASR from the dashboard with model and preprocessing selection
+- **Automatic Transcription**: Run Whisper or Parakeet ASR on demand, in batch, or via background watchers
+- **Dashboard-First Workflow**: Use the web dashboard to browse recordings and transcripts, launch ASR jobs, review outputs, and manage training-data preparation
+- **Semantic Search and Analytics**: Search transcript segments, inspect recent flights, view position summaries, and explore embeddings when RAG services are enabled
+- **Audio Lab and Workflow Editor**: Compare preprocessing methods, save reusable presets, and execute batch audio workflows from the UI
+- **Labeling and Manual Trim**: Chunk recordings, dual-label with Whisper and Parakeet, auto-trim dialog bleed, then manually retrim and verify difficult samples
+- **Training Export**: Normalize reviewed text, export NeMo manifests, and benchmark LoRA training outputs
 
 ## Requirements
 
@@ -91,20 +95,36 @@ recordings/
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/atc-recorder.git
+git clone https://github.com/simpsonry1620/atc-recorder.git
 cd atc-recorder
 
-# Build the image
+# Create local env/config files
+cp .env.example .env
+
+# Build the base image
 docker compose build
 
 # List available feeds
 docker compose run --rm atc-recorder feeds list kdca
 
+# Start the dashboard
+docker compose up -d atc-dashboard
+
+# Optional: start Whisper ASR services
+docker compose --profile asr up -d
+```
+
+Common next steps:
+
+```bash
 # Record a single feed for 30 minutes
 docker compose run --rm atc-recorder record kdca1_gnd --duration 30m
 
 # Download historical archives
 docker compose --profile archive run --rm atc-archiver download kdca1_gnd --date 2026-02-01
+
+# Open the dashboard
+xdg-open "http://localhost:8050"  # Linux
 ```
 
 ## Usage
@@ -192,6 +212,18 @@ docker compose up -d atc-dashboard
 
 - Local machine: `http://localhost:8050`
 - External access: `http://<server-ip>:8050`
+
+The dashboard is the recommended operator workflow once recordings and services are running. Current tabs include:
+
+- **Overview** for service and dataset status
+- **Transcripts** for browsing recordings, transcripts, and playback
+- **Search** for semantic transcript search
+- **Flights** and **Positions** for extracted traffic/activity views
+- **Embeddings** for vector inspection
+- **Audio Lab** for preprocessing experiments and transcript comparison
+- **Workflow** for reusable audio preprocessing pipelines
+- **Labeling** for chunking, dual-ASR review, auto-trim, manual retrim, normalization, and manifest export
+- **Training** for LoRA pipeline guidance and benchmark history
 
 Quick health check:
 
@@ -321,6 +353,8 @@ If you run both Whisper and Parakeet workers, do not have both watchers transcri
 
 The worker reads optional `transcription` settings from `config.yaml` (audio preprocessing mode, pause segmentation thresholds, output format, role diarization, and cross-file stitching).
 
+The dashboard can also trigger ASR runs manually for individual recordings and compare preprocessing outputs without leaving the UI.
+
 #### Transcribe Existing Recordings
 
 Use the batch command to process files already on disk:
@@ -416,6 +450,7 @@ The project supports a Phase 1 RAG workflow aligned with NVIDIA's streaming blue
 - Segment-level embeddings and Milvus indexing
 - Time-window and feed/channel filtering during semantic search
 - Minimal HTTP search API for downstream tools
+- Dashboard views for semantic search, recent flights, and controller-position summaries
 
 #### Enable RAG in config
 
