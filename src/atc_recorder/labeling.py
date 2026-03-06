@@ -44,7 +44,7 @@ class LabeledChunk:
 class LabelStore:
     """SQLite-backed store for labeled training data."""
 
-    VALID_STATUSES = ("pending", "accepted", "rejected", "verified")
+    VALID_STATUSES = ("pending", "accepted", "rejected", "verified", "needs_retrim")
 
     def __init__(self, db_path: Path):
         self.db_path = Path(db_path)
@@ -392,6 +392,7 @@ class LabelStore:
             "accepted": by_status.get("accepted", 0),
             "rejected": by_status.get("rejected", 0),
             "verified": by_status.get("verified", 0),
+            "needs_retrim": by_status.get("needs_retrim", 0),
             "avg_cer": round(avg_cer, 4) if avg_cer is not None else 0.0,
         }
 

@@ -2015,6 +2015,40 @@ def create_app(config: Config) -> FastAPI:
         thread.start()
         return {"batch_id": batch_id, "total": len(untrimmed), "status": "running"}
 
+    @app.post("/api/labeling/manual-trim/{chunk_id}")
+    async def labeling_manual_trim(chunk_id: str, request: Request):
+        """Apply user-specified trim boundaries to a single chunk."""
+        body = await request.json()
+        trim_start = float(body.get("trim_start", 0))
+        trim_end = float(body.get("trim_end", 0))
+
+        if trim_start >= trim_end:
+            raise HTTPException(400, "trim_start must be less than trim_end")
+
+        ls = _get_label_store()
+        chunk = ls.get_chunk(chunk_id)
+        if chunk is None:
+            raise HTTPException(404, "Chunk not found")
+
+        tcfg = _get_training_cfg()
+        archive_dir = Path(tcfg.chunks_dir).parent / "chunks_archive"
+
+        from .trimmer import trim_chunk_manual
+
+        result = trim_chunk_manual(chunk, ls, archive_dir, trim_start, trim_end)
+
+        if result.success:
+            ls.update_status(chunk_id, "accepted", verified_by="manual_trim")
+
+        return {
+            "success": result.success,
+            "error": result.error,
+            "trimmed_duration": result.trimmed_duration,
+            "original_duration": result.original_duration,
+            "trim_start": result.trim_start_sec,
+            "trim_end": result.trim_end_sec,
+        }
+
     @app.get("/api/labeling/summary")
     async def labeling_summary():
         return _get_label_store().summary()
@@ -2104,6 +2138,10 @@ def create_app(config: Config) -> FastAPI:
             "verified_by": chunk.verified_by,
             "created_at": chunk.created_at,
             "updated_at": chunk.updated_at,
+            "trim_start_sec": chunk.trim_start_sec,
+            "trim_end_sec": chunk.trim_end_sec,
+            "original_duration": chunk.original_duration,
+            "original_audio_path": chunk.original_audio_path,
         }
 
     @app.patch("/api/labeling/chunk/{chunk_id}")
@@ -2141,7 +2179,7 @@ def create_app(config: Config) -> FastAPI:
             raise HTTPException(400, f"Unknown action: {action}")
 
     @app.get("/api/labeling/audio/{chunk_id}")
-    async def labeling_audio(chunk_id: str, denoise: bool = False):
+    async def labeling_audio(chunk_id: str, denoise: bool = False, original: bool = False):
         chunk = _get_label_store().get_chunk(chunk_id)
         if chunk is None:
             cs = _get_chunk_store()
@@ -2150,7 +2188,10 @@ def create_app(config: Config) -> FastAPI:
                 raise HTTPException(404, "Chunk not found")
             audio_path = Path(c.output_path)
         else:
-            audio_path = Path(chunk.audio_path)
+            if original and chunk.original_audio_path:
+                audio_path = Path(chunk.original_audio_path)
+            else:
+                audio_path = Path(chunk.audio_path)
         if not audio_path.exists():
             raise HTTPException(404, "Audio file not found")
 
